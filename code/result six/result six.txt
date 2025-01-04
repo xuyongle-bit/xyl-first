@@ -1,0 +1,586 @@
+
+################单细胞层面----------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\GSE141383\\")
+rm(list=ls())
+
+
+rm(a)
+library(Seurat) 
+library(dplyr)
+library(tidyverse)
+library(devtools)
+#数据预处理------------------------------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\GSE141383\\GSE141383\\")
+
+
+name<-list.files()
+name<-name[c(1:6)]
+
+for (i in 2:6){
+  #shuju  
+  setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\GSE141383\\GSE141383\\")
+  mingzi<-name[[i]]
+  
+  dt<-read.table(mingzi,header = T)   #导入数据
+  rownames(dt)<-dt$GID
+  symble<-dt$Gene
+  #保证行名唯一性，合并重复基因
+  
+  dt<-dt[,-c(1:2)]
+  ids <- data.frame(geneid=rownames(dt),
+                    median=apply(dt,1,median)) #计算基因表达中位数，用于之后排序
+  
+  
+  ids$symbol <- symble #match返回其第二个参数中第一个参数匹配的位置,把g2s的geneid按照ids$geneid的顺序一个个取出来，从而得到ids$symbol这一列
+  
+  
+  ids <- ids[order(ids$symbol,ids$median,decreasing = T),] #将ids按照symbol排序，再把ids$symbol按照ids$median由大到小排序
+  ##去重复
+  dim(ids); table(duplicated(ids$symbol)) #统计查看重复的symbol
+  ids <- ids[!duplicated(ids$symbol),] #取出不重复的ids$symbol，duplicated函数会返回重复项，但是第一次出现它不会考虑在内
+  
+  ##转化geneid为symbol 
+  dt <- dt[rownames(ids),] #取出表达矩阵中ids有的行  
+  rownames(dt) <- ids[match(rownames(dt),ids$geneid),"symbol"]  #根据geneid和symbol进行匹配
+  #成功修改基因名并且去重
+  
+  
+  #给表达谱细胞名贴上来源标签以保证细胞名唯一性
+  cellname<-as.data.frame(colnames(dt))
+  mingzi <- gsub("\\.txt", "", mingzi)
+  
+  for (j in 1:nrow(cellname)){
+    
+    cellname[j,1]=paste(mingzi,cellname[j,1],sep="@")
+    
+    print(j)
+    
+  }
+  
+  colnames(dt)<-cellname$`colnames(dt)`
+  
+  info<-read.delim("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\GSE141383\\Glioma_GSE141383_CellMetainfo_table.tsv")#导入注释文件
+  index<-info[which(info$Cell%in%cellname$`colnames(dt)`),]
+  
+  
+  dt<-dt[,index$Cell]
+  
+  #构建对象
+  dt_Seurat<-CreateSeuratObject(dt,project="cancer",min.cells = 3)
+  table(info$Celltype..malignancy.)
+  
+  dt_Seurat@meta.data$celltype<-index$Celltype..malignancy.
+  dt_Seurat@meta.data$celltype1<-index$Celltype..major.lineage.
+  dt_Seurat@meta.data$celltype2<-index$Celltype..minor.lineage.
+  dt_Seurat@meta.data$come<-"GSE141383"
+  dt_Seurat@meta.data$batch<-mingzi
+  
+  #ref<-list()
+  ref[[i]]<-dt_Seurat
+  #cancer_seurat<-ref[[1]]
+  cancer_seurat<-merge(x = cancer_seurat, y = ref[[i]])
+  print(i)
+  
+}
+
+saveRDS(cancer_seurat,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\GSE141383\\Seurat_all.rds")
+
+
+
+#质控----------------------------
+##展示样本特性
+Seurat<-cancer_seurat
+Seurat[["percent.mt"]] <- PercentageFeatureSet(Seurat, pattern = "^MT-")
+VlnPlot(Seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat<- subset(Seurat, subset =  nFeature_RNA >200 & nFeature_RNA<3000 & percent.mt<2.5)
+Seurat<- NormalizeData(Seurat, normalization.method = "LogNormalize", scale.factor = 10000) 
+Seurat<- FindVariableFeatures(Seurat, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(Seurat) 
+Seurat <- ScaleData(Seurat, features = all.genes) 
+Seurat <- ScaleData(Seurat,vars.to.regress = "percent.mt") 
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+Seurat <- RunPCA(Seurat, features = Seurat@assays$RNA@var.features,npcs = 50)
+ElbowPlot(Seurat) 
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+#准确界定数据集的维度---------
+
+#将要检测的seurat对象传递给sce
+sce=Seurat
+# Determine percent of variation associated with each PC   
+pct <- sce [["pca"]]@stdev / sum( sce [["pca"]]@stdev) * 100
+
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+# Determine which PC exhibits cumulative percent greater than 90% 
+# and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+co1
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+# last point where change of % of variation is more than 0.1%.
+co2
+# Minimum of the two calculation
+pcs <- min(co1, co2)
+pcs
+# Create a dataframe with values
+plot_df <- data.frame(pct = pct,   cumu = cumu,   rank = 1:length(pct))
+# Elbow plot to visualize
+library(ggplot2)
+ggplot(plot_df, aes(cumu, pct, label = rank, color = rank > pcs)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct[pct > 5]), color = "grey") +
+  theme_bw()
+rm(sce)# 清除对象
+ndim=30#根据上图确定
+#降维聚类-----------------------------------------
+Seurat<- FindNeighbors(Seurat,dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+Seurat <- RunUMAP(Seurat,reduction = "pca", dims = 1:ndim)
+table(Seurat$celltype)
+plot2 <- DimPlot(Seurat, reduction = "umap", group.by = "seurat_clusters", pt.size=0.5, label = TRUE)
+plot2
+Seurat_recur<-Seurat[,which(Seurat$seurat_clusters =="2"|Seurat$seurat_clusters=="12")]
+plot1 <- DimPlot(Seurat_recur, reduction = "umap", group.by = "batch", pt.size=0.5, label = TRUE)
+plot1
+
+#  识别marker ---------------------------------------------------------------
+###find markers for every cluster compared to all remaining cells, report only the positive（？） ones 
+Seurat.markers <- FindAllMarkers(Seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) 
+newSeurat.markers<-Seurat.markers[which(Seurat.markers$p_val_adj<=0.05),]
+
+cluster_marker<-Seurat.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+
+#识别簇（注释）-----------------------------------
+all_marker<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\6组织上调基因并集.txt")
+#all_marker<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\com.txt")
+all_marker[,2]<-all_marker[,1]
+all_marker[,1]<-"development related cancer cells"
+colnames(all_marker)<-c("type","makers")#读取发育相关癌细胞marker
+
+# inter<-intersect(all_marker$makers,newSeurat.markers$gene)#P值小于0.05的基因与marker交集
+# inter<-as.data.frame(inter)
+
+int1<-intersect(all_marker$makers,cluster_marker$gene)#FC值前20的基因与marker交集
+
+top20mar<-cluster_marker[which(cluster_marker$gene%in%int1),]#FC值前20的交集基因表达
+table(top20mar$cluster)
+mar<-top20mar[which(top20mar$cluster=="2"|top20mar$cluster=="12"),]
+table(mar$gene)
+table(top20mar$gene)
+#可视化每个簇中这个基因的表达高低，小提琴图
+VlnPlot(Seurat, features = c("CDK6","NUSAP1","TOP2A","TPX2","UBE2S","CKS2"))
+
+FeaturePlot(Seurat, features = c("CDK6","NUSAP1","TOP2A","TPX2","UBE2S","CKS2"))#细胞降维图
+#fdr0.05mar<-newSeurat.markers[which(newSeurat.markers$gene%in%inter$inter),]#P值小于0.05的交集基因表达
+stem_cell<-Seurat[,which(Seurat$seurat_clusters=="2"|Seurat$seurat_clusters=="12")]
+
+# saveRDS(stem_cell,"stem_cell.rds")
+# saveRDS(Seurat,"Seurat.rds")
+
+Seurat<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\Seurat.rds")
+#查看8簇中预前预后细胞比例
+
+stem_cell<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\stem_cell.rds")
+
+table(stem_cell$treatment)
+table(Seurat$treatment)
+
+table(stem_cell$response)
+table(Seurat$response)
+
+table(stem_cell$timePoint)
+table(Seurat$timePoint)
+
+
+
+
+#进行拟时序分析和干性打分，判断发育相关簇的细胞是否符合期望----------------------
+# CytoTRACE ----------------------------------------------------------------------
+#包########################################################cytoTRANCE
+
+
+#定位python路径
+library(reticulate)#使R能读懂python环境
+Sys.setenv(RETICULATE_PYTHON="D:\\Program Files\\Python311\\python.exe")
+use_python("D:\\Program Files\\Python311\\python.exe") 
+py_available()
+use_python("D:\\Program Files\\Python311\\python.exe")
+py_config()
+py_available()
+
+import("numpy")
+import("sklearn")
+import("scipy")
+import("annoy")
+import("scanoramaCT")
+#导入包
+library(CytoTRACE)
+library(Seurat) 
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\GSE141383\\CytoTRACE\\")
+#Seurat<-readRDS("Seurat.rds")
+#下面是直接在软件上运行，但他会自动保持结果的可视化，不好看.
+count<- Seurat@assays$RNA@counts
+
+Seurat@meta.data$cluster_new <- paste("cluster",Seurat@meta.data$seurat_clusters,sep="_")
+
+count<-as.data.frame(count)
+clusters<-Seurat$cluster_new
+table(Seurat$seurat_clusters)
+
+
+results <- CytoTRACE(count)#运行 CytoTRACE
+
+plotCytoTRACE(results, phenotype = clusters)#可视化 CytoTRACE 结果
+
+saveRDS(results,"results.rds")
+
+#箱式图
+library(ggplot2)
+
+CytoTRACE_plot_table<-read.table("CytoTRACE_plot_table.txt")
+CytoTRACE_plot_table$cellname<-rownames(CytoTRACE_plot_table)
+stem_cell<-Seurat[,which(Seurat$seurat_clusters=="9"|Seurat$seurat_clusters=="90"|Seurat$seurat_clusters=="8")]
+two_cell<-as.data.frame(colnames(stem_cell))
+
+CytoTRACE_plot_table$change <- as.factor(ifelse(CytoTRACE_plot_table$cellname%in%two_cell$`colnames(stem_cell)`,"Y","N"))
+table(CytoTRACE_plot_table$CytoTRACE)
+
+
+ggplot(data = CytoTRACE_plot_table,aes(x = change, y = CytoTRACE)) + 
+  geom_boxplot(aes(fill = change))+ scale_fill_manual(values = c("#E69F00","#56B4E9"))+
+  theme_classic()+
+  theme(legend.position="right")+
+  labs(title="Plot of length per dose",x="relevance", y = "Length")
+
+#monocle---------------------------------
+
+library(monocle)
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\GSE141383\\monocle2\\")
+#Seurat<-readRDS("Seurat_all.rds")
+
+stem_cell<-Seurat[,which(Seurat$seurat_clusters=="2"|Seurat$seurat_clusters=="12")]
+stem_cell$stem<-"Y"
+nstem_cell<-Seurat[,-which(Seurat$seurat_clusters=="2"|Seurat$seurat_clusters=="12")]
+nstem_cell$stem<-"N"
+
+Seu<-merge(stem_cell,nstem_cell)
+table(Seu$stem)
+expr_matrix <- as(as.matrix(Seu@assays$RNA@counts), "sparseMatrix")
+p_data <- Seu@meta.data
+f_data <- data.frame(gene_short_name = row.names(Seu) ,row.names = row.names(Seu))
+#构建CDS对象
+pd <- new( "AnnotatedDataFrame", data = p_data)
+fd <- new( "AnnotatedDataFrame", data = f_data)
+#将p_data和f_data从data.frame转换AnnotatedDataFrame对象。
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+#开始运行
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+cds <- detectGenes(cds,min_expr = 0.1)
+print(head(fData(cds)))#此时有13714个基因
+expressed_genes <- row.names(subset(fData(cds),num_cells_expressed >= 10))#过滤掉在小于10个细胞中表达的基因,还剩11095个基因。
+cds$celltype
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~seurat_clusters",cores=1)
+head(diff)
+deg <- subset(diff,qval < 0.01)
+deg <- deg[ order(deg$qval,decreasing=F),]
+head(deg)
+ordergene <- rownames(deg)
+cds <- setOrderingFilter(cds, ordergene)
+plot_ordering_genes(cds)
+ordergene <- row.names(deg)[order(deg$qval)][1:2000]
+cds <- reduceDimension(cds, max_components = 2,method = "DDRTree")
+
+cds <- orderCells(cds)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE)
+plot_cell_trajectory(cds,color_by = "State",size=1,show_backbone=TRUE)
+plot_cell_trajectory(cds,color_by = "seurat_clusters")
+cell_colors<- c("#F9D23C", "#ED97CA")
+plot_cell_trajectory(cds,color_by = "stem",size=1,show_backbone=TRUE)+ scale_color_manual(values=cell_colors)
+
+saveRDS(cds,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\GSE141383\\monocle2\\cds.rds")
+
+##############bulk层面------------------------------------
+# 1.CGGA下载数据处理-------------------------------
+
+library(dplyr)
+library(readr)
+library(tidyverse)
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\CGGC（mRNAseq_693）胶质瘤\\")
+#读取下载来的count文件  压缩格式的
+dat = read.table("CGGA.mRNAseq_693.Read_Counts-genes.20220620.txt",
+                 header = T)#有列名
+rownames(dat)<-dat$gene_name
+exp<-dat[,-1]
+
+
+#临床信息读取
+clinical <- read_tsv("CGGA.mRNAseq_693_clinical.20200506.txt")
+
+
+######GSEA---------------------------------
+library(GSVA)
+#导入自己的基因
+
+
+gene1<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\6组织上调基因并集.txt")#gene这个文件就是读取咱们所选定的基因列表，例如2000多个那个up合集，或者其他基因集。
+
+
+# gene1<-as.data.frame(c("CDK6","NUSAP1","TOP2A","TPX2","UBE2S","CKS2"))
+# colnames(gene1)<-"V1"
+####  GSVA  
+#GSVA算法需要处理logCPM, logRPKM,logTPM数据或counts数据的矩阵
+
+exp <- as.matrix(exp)
+Sys.time()
+gsva_mat <- gsva(expr=exp, 
+                 gset.idx.list=gene1, 
+                 kcdf="Poisson" ,#"Gaussian" for logCPM,logRPKM,logTPM, "Poisson" for counts
+                 verbose=T, 
+                 parallel.sz = parallel::detectCores())
+Sys.time()
+
+
+write.csv(gsva_mat,"gsva_mat.csv")
+
+
+gsva_mat<-as.data.frame(gsva_mat)
+dim(gsva_mat)
+a<-t(gsva_mat)
+a<-as.data.frame(a)
+ss<-as.data.frame(colnames(exp))
+
+a<- tibble::rownames_to_column(a,"X")
+a<- a[order(a$V1, decreasing = TRUE),]
+
+# 从排序后的数据框中取一半的数据
+
+
+# # 计算均值
+# mean_value <- mean(a$V1)
+# 
+# # 计算标准差
+# sd_value <- sd(a$V1)
+# 
+# # 根据均值加标准差分成两组
+# a_high <- a[which(a$V1 >= mean_value + sd_value),]
+# a_low <- a[which(a$V1 < mean_value + sd_value),]
+# 
+
+half_length <- nrow(a) / 3
+
+a_high <- head(a, half_length)
+a_low <- tail(a,half_length)
+
+
+colnames(a_high)<-c("CGGA_ID","score")
+colnames(a_low)<-c("CGGA_ID","score")
+
+#exp_high<-exp[,a_high$X]
+#exp_low<-exp[,a_low$X]
+#exp<-cbind(exp_high,exp_low)
+
+#查看癌胚得分高低组复发样本差异--------------------------
+
+clinical_type<-as.data.frame(clinical[,1:2])
+table(clinical_type$PRS_type)
+
+clinical_H<-merge(x=clinical_type,y=a_high,by = "CGGA_ID",all=FALSE)
+
+clinical_L<-merge(x=clinical_type,y=a_low,by = "CGGA_ID",all=FALSE)
+
+table(clinical_H$PRS_type);table(clinical_L$PRS_type)
+
+
+matrix <- matrix(c(98, 133, 175, 56), nrow = 2, byrow = TRUE)
+
+# 使用fisher.test函数进行费舍尔精确检验
+fisher.test(matrix)
+
+
+#绘制混淆矩阵图-----------------------------
+library(ggplot2)
+
+# 准备数据
+data <- data.frame(
+  "Onco-fetal score" = c("High", "High", "Low", "Low"),
+  "Relapse" = c("No", "Yes", "No", "Yes"),
+  "Count" = c(98, 133, 175, 56)
+)
+
+# 计算百分比
+data$Percentage <- round(data$Count / sum(data$Count) * 100, 2)
+
+# 绘制混淆矩阵图
+ggplot(data, aes(x = Relapse, y = Onco.fetal.score, fill = Count, label = paste(Count, "(", Percentage, "%)", sep = ""))) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = paste(data$Count, "(", data$Percentage, "%)", sep = "")), size = 4, color = "black") +
+  labs(x = "Relapse", y = "Onco-fetal score", title = "b") +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_fill_gradient(low = "#f0f0f0", high = "#2A5783") +
+  annotate("text", x = "Yes", y = "Low", label = "*P = 2.836e-14", size = 9, color = "red")
+
+
+#################分析两分组中复发样本富集到什么功能----------------------------------------
+
+#提取两复发样本
+rec_H<-clinical_H[which(clinical_H$PRS_type=="Recurrent"),]
+rec_L<-clinical_L[which(clinical_L$PRS_type=="Recurrent"),]
+
+clinical_rec<-rbind(rec_H,rec_L)
+clinical_rec$group<-c(rep("H", 133), rep("L", 56))
+
+exp_H<-exp[,rec_H$CGGA_ID]
+exp_L<-exp[,rec_L$CGGA_ID]
+exp_rec<-cbind(exp_H,exp_L)
+
+library(GSEABase)
+
+gene_list1 <- getGmt("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\CGGC（mRNAseq_693）胶质瘤\\佳宁师姐基因集\\h.all.v7.4.symbols.gmt")
+gene_list2 <- getGmt("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\CGGC（mRNAseq_693）胶质瘤\\佳宁师姐基因集\\cellstate.gmt")
+
+
+
+Sys.time()
+#50个hallmarker
+gsva_50_hallmarker <- gsva(expr=exp_rec, 
+                           gset.idx.list=gene_list1, 
+                           kcdf="Poisson" ,#"Gaussian" for logCPM,logRPKM,logTPM, "Poisson" for counts
+                           verbose=T, 
+                           parallel.sz = parallel::detectCores())#调用所有核
+
+Sys.time()
+
+
+
+
+
+Sys.time()
+#细胞状态
+gsva_cell_state <- gsva(expr=exp_rec, 
+                        gset.idx.list=gene_list2, 
+                        kcdf="Poisson" ,#"Gaussian" for logCPM,logRPKM,logTPM, "Poisson" for counts
+                        verbose=T, 
+                        parallel.sz = parallel::detectCores())#调用所有核
+
+Sys.time()
+
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\CGGC（mRNAseq_693）胶质瘤\\佳宁师姐基因集\\三分之一\\")
+
+write.csv(gsva_50_hallmarker,"gsva_50_hallmarker.csv")
+write.csv(gsva_cell_state,"gsva_cell_state.csv")
+#### 进行limma差异处理 ####
+##设定 实验组exp / 对照组ctr
+library(limma)
+
+
+case="H"
+contral="L"
+
+design <- model.matrix(~0+clinical_rec$group)
+colnames(design) <- levels(factor(clinical_rec$group))
+rownames(design) <- colnames(gsva_cell_state)
+head(design)
+contrast.matrix <- makeContrasts(contrasts=paste0(case,'-',contral),  #"exp/ctrl"
+                                 levels = design)
+
+fit1 <- lmFit(gsva_cell_state,design)                 #拟合模型
+fit2 <- contrasts.fit(fit1, contrast.matrix) #统计检验
+efit <- eBayes(fit2)                         #修正
+efit$p.value
+summary(decideTests(efit,lfc=0, p.value=0.05)) #统计查看差异结果
+
+tempOutput <- topTable(efit, coef=paste0(case,'-',contral), n=Inf)
+dim(efit)
+
+degs <- na.omit(tempOutput) 
+head(degs)
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\胶质瘤复发\\CGGC（mRNAseq_693）胶质瘤\\佳宁师姐基因集\\三分之一\\")
+write.csv(degs,"cell_state_degs.csv")
+write.csv(degs,"50_hallmarkerdegs.csv")
+#### 条形图绘制 KEGG####-------------------------------------
+library(tidyverse)  # ggplot2 stringer dplyr tidyr readr purrr  tibble forcats
+library(ggthemes)
+library(ggprism)
+
+p_cutoff=0.001
+degs <- degs  #载入gsva的差异分析结果
+
+
+#Diff <- rbind(subset(degs,logFC>0)[1:20,], subset(degs,logFC<0)[1:20,]) 
+#选择想要的通路，在外面表格中选好了  
+
+Diff<-read.csv("50_hallmarker_degs（想要的通路）.csv")
+
+rownames(Diff)<- Diff$X;Diff<-Diff[,-1]
+Diff$group<-"hallmarker"
+
+Diff1<-read.csv("cell_state_degs（想要的通路）.csv")
+
+rownames(Diff1)<- Diff1$X;Diff1<-Diff1[,-1]
+Diff1$group<-"cell_state"
+
+Diff2<-rbind(Diff,Diff1)
+
+dat_plot <- data.frame(id  = row.names(Diff2),
+                       p   = Diff2$P.Value,
+                       lgfc= Diff2$logFC,
+                       batch=Diff2$group)
+
+dat_plot$group <- ifelse(dat_plot$batch=="cell_state" ,1,-1)    # 将上调设为组1，下调设为组-1
+dat_plot$lg_p <- -log10(dat_plot$p)*dat_plot$group # 将上调-log10p设置为正，下调-log10p设置为负
+#dat_plot$id <- str_replace(dat_plot$id, "","");dat_plot$id[1:10]
+dat_plot$threshold <- factor(ifelse(abs(dat_plot$p) <= p_cutoff,
+                                    ifelse(dat_plot$batch=="cell_state" ,'Up','Down'),'Not'),
+                             levels=c('Up','Down','Not'))
+
+dat_plot <- dat_plot %>% arrange(lg_p)
+dat_plot$id <- factor(dat_plot$id,levels = dat_plot$id)
+
+## 设置不同标签数量
+low1 <- dat_plot %>% filter(lg_p < log10(p_cutoff)) %>% nrow()
+low0 <- dat_plot %>% filter(lg_p < 0) %>% nrow()
+high0 <- dat_plot %>% filter(lg_p < -log10(p_cutoff)) %>% nrow()
+high1 <- nrow(dat_plot)
+
+p <- ggplot(data = dat_plot,aes(x = id, y = lg_p, 
+                                fill = threshold)) +
+  geom_col()+
+  coord_flip() + 
+  scale_fill_manual(values = c('Up'= '#36638a','Not'='#cccccc','Down'='#7bcd7b')) +
+  geom_hline(yintercept = c(-log10(p_cutoff),log10(p_cutoff)),color = 'white',size = 0.5,lty='dashed') +
+  xlab('') + 
+  ylab('-log10(P.Value) of GSVA score') + 
+  guides(fill="none")+
+  theme_prism(border = T) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  geom_text(data = dat_plot[1:low1,],aes(x = id,y = 0.1,label = id),
+            hjust = 0,color = 'black') + #黑色标签
+  geom_text(data = dat_plot[(low1 +1):low0,],aes(x = id,y = 0.1,label = id),
+            hjust = 0,color = 'grey') + # 灰色标签
+  geom_text(data = dat_plot[(low0 + 1):high0,],aes(x = id,y = -0.1,label = id),
+            hjust = 1,color = 'grey') + # 灰色标签
+  geom_text(data = dat_plot[(high0 +1):high1,],aes(x = id,y = -0.1,label = id),
+            hjust = 1,color = 'black') # 黑色标签
+p
+ggsave("GSVA_barplot_pvalue.pdf",p,width = 15,height  = 15)
+
+
+
+

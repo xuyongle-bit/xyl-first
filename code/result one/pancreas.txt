@@ -1,0 +1,496 @@
+######胎儿数据预处理--------------------------------
+library(Seurat) 
+library(remotes)
+library(patchwork)
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library(grid)
+library(gridExtra)
+library(data.table)
+library(Rcpp)
+library(harmony)
+library(tidyverse)
+setwd("F:\\暑假作业\\2022年暑假工作\\胰腺\\胎儿\\")
+
+babyfinal<-readRDS("fetal.rds")
+
+
+anno<-readRDS("df_cell.RDS")#导入注释文件
+table(anno$Organ)
+anno<-anno[which(anno$Organ=="Pancreas"),]
+anno<-anno[,c(1,10,13)]
+
+
+Seurat_baby <- CreateSeuratObject(babyfinal ,project = "baby",min.cells = 3)
+Seurat_baby@meta.data$orig.ident<-"baby"
+Seurat_baby@meta.data$come<-"GSE156793"
+Seurat_baby@meta.data$celltype<-anno$Main_cluster_name
+Seurat_baby@meta.data$batch<-anno$Batch
+table(Seurat_baby$celltype)
+Seurat_baby<-Seurat_baby[,which(Seurat_baby@meta.data$celltype=="Acinar cells"|Seurat_baby@meta.data$celltype=="Ductal cells")]
+
+
+saveRDS(Seurat_baby,"Seurat_baby.rds")
+#####################识别癌胚细胞------------------------
+
+library(tidyverse)
+library(devtools)
+library(harmony)
+library(Seurat) 
+library(remotes)
+library(patchwork)
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library(grid)
+library(gridExtra)
+library(data.table)
+library(Rcpp)
+library(infercnv)
+library(SingleR)
+
+# 将24个癌症数据整合 
+setwd('F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\CRA001160\\PDAC\\')
+name<-list.files()
+name<-name[c(1:24)]
+#set.seed(123)
+#data_seurat<- list()
+
+for (i in 2:24){
+  #shuju  
+  setwd('F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\CRA001160\\PDAC\\')
+  mingzi<-paste(name[[i]],'',sep='')
+  
+  dt<-Read10X(mingzi)   #导入数据
+  
+  #给表达谱细胞名贴上来源标签以保证细胞名唯一性
+  cellname<-as.data.frame(colnames(dt))
+  for (j in 1:nrow(cellname)){
+    
+    cellname[j,1]=paste(mingzi,cellname[j,1],sep="_")
+    
+    print(j)
+    
+  }
+  
+  colnames(dt)<-cellname$`colnames(dt)`
+  
+  info<-read.delim("F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息\\PAAD_CRA001160_CellMetainfo_table.tsv")#导入注释文件
+  
+  info1<-as.data.frame(strsplit(cellname$`colnames(dt)`,"-",fixed = T))
+  info1<-as.data.frame(t(info1)) 
+  cellname$`colnames(dt)`<-info1$V1
+  
+  colnames(dt)<-cellname$`colnames(dt)`
+  
+  
+  info2<-as.data.frame(info[which(info$Cell %in% cellname$`colnames(dt)`),]) 
+  dt<-dt[,info2$Cell]
+  
+  #构建对象
+  dt_Seurat<-CreateSeuratObject(dt,project="cancer",min.cells = 3)
+  table(info2$Celltype..malignancy.)
+  
+  dt_Seurat@meta.data$celltype<-info2$Celltype..minor.lineage.
+  dt_Seurat@meta.data$come<-"CRA001160"
+  dt_Seurat@meta.data$batch<-mingzi
+  dt_Seurat@meta.data$orig.ident<-"cancer"
+  #ref<-list()
+  ref[[i]]<-dt_Seurat
+  #cancer_seurat<-ref[[1]]
+  cancer_seurat<-merge(x = cancer_seurat, y = ref[[i]],merge.data = F)
+  print(i)
+  
+}
+
+saveRDS(cancer_seurat,"F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息\\Seurat_cancer.rds")
+
+# （开始胎儿癌症去批次）提取恶性细胞加癌症数据预处理 
+
+
+Seurat_cancer<-readRDS("F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息\\Seurat_cancer.rds")
+Seurat_baby<-readRDS("F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息\\Seurat_baby.rds")
+table(Seurat_baby$celltype)
+table(Seurat_cancer$celltype)
+Idents(Seurat_cancer) = 'cancer'
+Idents(Seurat_baby) = 'baby'
+Seurat_cancer1<-Seurat_cancer[,Seurat_cancer$celltype=="Malignant cells"]
+
+Seurat_cancer<-Seurat_cancer1
+Seurat_cancer[["percent.mt"]] <- PercentageFeatureSet(Seurat_cancer, pattern = "^MT-")
+VlnPlot(Seurat_cancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat_cancer<- subset(Seurat_cancer, subset =  nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt<12)
+
+
+Seurat_baby[["percent.mt"]] <- PercentageFeatureSet(Seurat_baby, pattern = "^MT-")
+VlnPlot(Seurat_baby, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat_baby<- subset(Seurat_baby, subset =  nFeature_RNA > 200 & nFeature_RNA < 2000 & percent.mt<15)
+
+
+
+ref<-list()
+ref[[1]]<-Seurat_baby
+ref[[2]]<-Seurat_cancer
+
+data_seurat_all<-merge(x = ref[[1]], y = ref[[2]],merge.data = F)
+#data_seurat_all[["percent.mt"]] <- PercentageFeatureSet(data_seurat_all, pattern = "^MT-")
+##展示样本特性
+VlnPlot(data_seurat_all, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+#data_seurat_all<- subset(data_seurat_all, subset =  nFeature_RNA >200 & percent.mt<15)
+data_seurat_all$log10GenesPerUMI <- log10(data_seurat_all$nFeature_RNA)/log10(data_seurat_all$nCount_RNA)
+#提取计数
+counts <- GetAssayData(object =data_seurat_all, slot = "counts")
+#根据在每个细胞的计数是否大于0为每个基因输出一个逻辑向量
+nonzero <- counts > 0
+# 将所有TRUE值相加，如果每个基因的TRUE值超过10个，则返回TRUE。
+keep_genes <- Matrix::rowSums(nonzero) >= 10
+# 仅保留那些在10个以上细胞中表达的基因
+filtered_counts <- counts[keep_genes, ]
+# 重新赋值给经过过滤的Seurat对象
+data_seurat_all <- CreateSeuratObject(filtered_counts, meta.data = data_seurat_all@meta.data)
+data_seurat_all<- NormalizeData(data_seurat_all, normalization.method = "LogNormalize", scale.factor = 10000) 
+data_seurat_all<- FindVariableFeatures(data_seurat_all, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(data_seurat_all) 
+data_seurat_all <- ScaleData(data_seurat_all, features = all.genes) 
+data_seurat_all <- ScaleData(data_seurat_all,vars.to.regress = "percent.mt") 
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+data_seurat_all <- RunPCA(data_seurat_all, features = data_seurat_all@assays$RNA@var.features,npcs = 50)
+ElbowPlot(data_seurat_all) 
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+ndim=15#根据上图确定
+data_seurat_all <- RunUMAP(data_seurat_all, reduction = "pca", dims = 1:ndim)
+p1<-DimPlot(data_seurat_all, reduction = "umap",group.by = "orig.ident") + ggtitle("before")
+p1
+# p11<-DimPlot(data_seurat_all, reduction = "umap",group.by = "batch") + ggtitle("before")
+# p11
+p2<-DimPlot(data_seurat_all, reduction = "umap",group.by = "come") + ggtitle("before")
+p2
+library(harmony)
+#去批次
+data_seurat_all <- RunHarmony(data_seurat_all , group.by.vars = "orig.ident")
+#降维聚类
+data_seurat_all<- FindNeighbors(data_seurat_all, reduction = "harmony", dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+data_seurat_all <- RunUMAP(data_seurat_all,reduction = "harmony", dims = 1:ndim)
+##作图
+#group_by_sample
+plot1 = DimPlot(data_seurat_all, reduction = "umap", group.by='orig.ident')
+plot1
+plot2 <- DimPlot(data_seurat_all, reduction = "umap", group.by = "seurat_clusters", pt.size=0.5, label = TRUE)
+plot2
+# plot3 <- DimPlot(data_seurat_all, reduction = "umap", group.by = "batch")
+# plot3
+plot4 <- DimPlot(data_seurat_all, reduction = "umap", group.by = "come")
+plot4
+saveRDS(data_seurat_all,"F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息\\Seudata.rds")
+
+#  识别marker ---------------------------------------------------------------#
+###find markers for every cluster compared to all remaining cells, report only the positive（？） ones 
+setwd("F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息\\")
+Seudata<-readRDS("Seudata.rds")
+Seudata<-data_seurat_all
+
+Seudata.markers <- FindAllMarkers(Seudata, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) 
+newSeudata.markers<-Seudata.markers[which(Seudata.markers$p_val_adj<=0.05),]
+
+
+write.table(Seudata.markers,file = "Seudata.markers.txt",sep = "\t",quote = F,row.names = T)
+write.table(newSeudata.markers,file = "newSeudata.markers.txt",sep = "\t",quote = F,row.names = T)
+
+
+# Seudata.markers<-read.table("Seudata.markers.txt", header = T, sep = "\t", stringsAsFactors = F)
+# newSeudata.markers<-read.table("newSeudata.markers.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+cluster_marker<-newSeudata.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC)
+
+
+marker<-list()
+gene<-cluster_marker
+gene<-gene[,7]
+#根据簇的多少来定范围
+for (i in 0:13) {
+  cluster_gene<-gene[which(cluster_marker$cluster==i),]
+  for (j in 2:20) {
+    cluster_gene[1,1]<-paste(cluster_gene[1,1],cluster_gene[j,1],sep=",")
+    print(j)
+  }
+  a<-cluster_gene[1,1]
+  marker[[i+1]]<-a
+  print(i)
+}
+write.table(marker,file = "marker1.txt",sep = "\t",quote = F,row.names = F)
+
+
+
+
+##比例
+b<-Seudata@active.ident
+b<-as.data.frame(b)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+#细胞类型数量
+aa<-as.data.frame(bbb[which(bbb$b==0),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==1),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==2),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==3),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==4),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==5),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==6),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==7),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==8),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==9),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==10),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==11),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==12),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==13),])
+table(aa[,3])
+aa<-as.data.frame(bbb[which(bbb$b==14),])
+table(aa[,3])
+#cluster数量
+aa<-as.data.frame(bbb[which(bbb$b==0),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==1),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==2),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==3),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==4),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==5),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==6),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==7),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==8),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==9),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==10),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==11),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==12),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==13),])
+table(aa$`Seudata@meta.data$orig.ident`)
+aa<-as.data.frame(bbb[which(bbb$b==14),])
+table(aa$`Seudata@meta.data$orig.ident`)
+p6<-DimPlot(Seudata, reduction = "umap",group.by = "celltype",label=TRUE)
+p6
+
+
+aaaa<-as.data.frame(Seudata@meta.data$seurat_clusters)
+aaaa[which(aaaa[,1]=="0"),2]<-"Acinar cells" 
+aaaa[which(aaaa[,1]=="1"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="2"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="3"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="4"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="5"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="6"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="7"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="8"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="9"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="10"),2]<-"Epithelial_cells" 
+aaaa[which(aaaa[,1]=="11"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="12"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="13"),2]<-"Epithelial_cells"
+aaaa[which(aaaa[,1]=="14"),2]<-"Epithelial_cells"
+
+saveRDS(Seudata,"final_seurat.rds")
+
+
+
+#癌胚细胞与旁观者细胞去批次-----------------------
+
+setwd("F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息（CRA001160）胰腺\\")
+Seurat_cancer<-readRDS("F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息（CRA001160）胰腺\\Seurat_cancer.rds")
+Idents(Seurat_cancer) = 'cancer'
+Seurat_cancer<-Seurat_cancer[,Seurat_cancer$celltype=="Malignant cells"]
+Seudata<-readRDS("final_seurat.rds")
+
+
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "14")
+f<-ab[index1,]
+cancer_f<-Seurat_cancer[,rownames(f)]
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1")
+a<-ab[index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+Idents(cancer_f) = 'f'
+Idents(cancer_a) = 'a'
+
+cancer_f$relevance<-"no"
+cancer_a$relevance<-"yes"
+
+
+ref<-list()
+ref[[1]]<-cancer_f
+ref[[2]]<-cancer_a
+
+data_seurat_all<-merge(x = ref[[1]], y = ref[[2]],merge.data = F)
+
+table(data_seurat_all$orig.ident)
+data_seurat_all[["percent.mt"]] <- PercentageFeatureSet(data_seurat_all, pattern = "^MT-")
+fan_seurat<-data_seurat_all
+##展示样本特性
+VlnPlot(fan_seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+
+fan_seurat<- subset(fan_seurat, subset =  nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt<12)
+
+#提取计数
+counts <- GetAssayData(object =fan_seurat, slot = "counts")
+#根据在每个细胞的计数是否大于0为每个基因输出一个逻辑向量
+nonzero <- counts > 0
+# 将所有TRUE值相加，如果每个基因的TRUE值超过10个，则返回TRUE。
+keep_genes <- Matrix::rowSums(nonzero) >= 10
+# 仅保留那些在10个以上细胞中表达的基因
+filtered_counts <- counts[keep_genes, ]
+# 重新赋值给经过过滤的Seurat对象
+fan_seurat <- CreateSeuratObject(filtered_counts, meta.data = fan_seurat@meta.data)
+fan_seurat<- NormalizeData(fan_seurat, normalization.method = "LogNormalize", scale.factor = 10000) 
+fan_seurat<- FindVariableFeatures(fan_seurat, selection.method = "vst", nfeatures = 2000)
+
+ref.merged <-fan_seurat
+#对高可变基因进行标准化
+all.genes <- rownames(ref.merged) 
+ref.merged <- ScaleData(ref.merged, features = all.genes) 
+ref.merged <- ScaleData(ref.merged,vars.to.regress = "percent.mt") 
+
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+ref.merged <- RunPCA(ref.merged, features = ref.merged@assays$RNA@var.features,npcs = 50)
+
+
+# ref.merged <- JackStraw(ref.merged, num.replicate = 100,dims = 50) 
+# ref.merged <- ScoreJackStraw(ref.merged, dims = 1:50) 
+# # 使用JackStrawPlot函数进行可视化 
+# JackStrawPlot(ref.merged, dims = 1:30) 
+
+ElbowPlot(ref.merged) 
+
+
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+ndim=10#根据上图确定
+ref.merged <- RunUMAP(ref.merged, reduction = "pca", dims = 1:ndim)
+
+p1<-DimPlot(ref.merged, reduction = "umap",group.by = "orig.ident") + ggtitle("before")
+p1
+p3<-DimPlot(ref.merged, reduction = "umap",group.by = "relevance") + ggtitle("before")
+p3
+
+
+library(harmony)
+#去批次
+ref.merged <- RunHarmony(ref.merged , group.by.vars = "orig.ident")
+#降维聚类
+ref.merged<- FindNeighbors(ref.merged, reduction = "harmony", dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+ref.merged <- RunUMAP(ref.merged,reduction = "harmony", dims = 1:ndim)
+##作图
+#group_by_sample
+plot1 = DimPlot(ref.merged, reduction = "umap", group.by='orig.ident')
+plot1
+plot2 <- DimPlot(ref.merged, reduction = "umap", group.by = "seurat_clusters", pt.size=0.5, label = TRUE)
+plot2
+# plot3 <- DimPlot(data_seurat_all, reduction = "umap", group.by = "batch")
+# plot3
+plot4 <- DimPlot(ref.merged, reduction = "umap", group.by = "relevance")
+plot4
+
+
+#癌胚细胞与成人细胞去批次-----------------------
+#导入成人数据--------------#
+setwd("G:\\成人单细胞数据\\")
+AdultPancreas<-readRDS("AdultPancreas.rds")#导入数据
+info<-read.delim("HCL_Fig1_cell_Info.txt")#导入注释文件
+
+table(info$sample)
+pancreas_info<-info[which(info$sample=="AdultPancreas"),]
+table(pancreas_info$celltype)
+adult_seurat <- CreateSeuratObject(AdultPancreas ,project = "adult")
+adult_seurat$celltype<-pancreas_info$celltype
+adult_seurat$come<-"adult_pancreas"
+adult_seurat$batch<-pancreas_info$batch
+adult_seurat$stage<-pancreas_info$stage
+adult_seurat$donor<-pancreas_info$donor
+table(adult_seurat$celltype)
+adult_seurat<-adult_seurat[,which(adult_seurat$celltype=="Pancreas exocrine cell")]
+#导入癌症数据，只要癌胚样细胞-----------#
+
+setwd("G:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息（CRA001160）胰腺\\")
+Seurat_cancer<-readRDS("G:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息（CRA001160）胰腺\\Seurat_cancer.rds")
+Idents(Seurat_cancer) = 'cancer'
+table(Seurat_cancer$celltype)
+Seurat_cancer<-Seurat_cancer[,Seurat_cancer$celltype=="Malignant"]
+Seudata<-readRDS("final_seurat.rds")
+
+
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1")
+a<-ab[index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+cancer_seurat_exp<-cancer_a@assays$RNA@counts
+cancer_seurat<-CreateSeuratObject(cancer_seurat_exp ,project = "cancer")
+cancer_seurat$celltype<-"onco-fetal like cells"
+cancer_seurat$come<-"cancer_seurat"
+cancer_seurat$batch<-"non"
+cancer_seurat$stage<-"non"
+cancer_seurat$donor<-"non"
+cancer_seurat$orig.ident<-"CancerPancreas"
+#去批次------------------------#
+data_seurat_all<-my_data
+data_seurat_all <- RunHarmony(data_seurat_all , group.by.vars = "orig.ident")
+#降维聚类
+data_seurat_all<- FindNeighbors(data_seurat_all, reduction = "harmony", dims = 1:ndim) %>% FindClusters(resolution = c(0.3))
+data_seurat_all <- RunUMAP(data_seurat_all,reduction = "harmony", dims = 1:ndim)
+##作图
+#group_by_sample
+plot1 = DimPlot(data_seurat_all, reduction = "umap", group.by='orig.ident',cols = c("#AAD09E", "#5B8E61"))
+plot1
+p22 <- DimPlot(data_seurat_all, reduction = "umap", group.by = "seurat_clusters", pt.size=0.5, label = TRUE)
+p22
+p11<-DimPlot(data_seurat_all, reduction = "umap",group.by = "batch")
+p11
+table(data_seurat_all$celltype)

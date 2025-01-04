@@ -1,0 +1,490 @@
+
+#TF热图------------------------
+#构建矩阵
+mat<-matrix(0,nrow = 6, ncol = 6)
+rownames(mat) = c("lung", "liver", "brain", "kidney", "stomach", "pancrease")
+colnames(mat) = c("lung", "liver", "brain", "kidney", "stomach", "pancrease")
+# mat[1,]<-c(36,1,2,15,0,0)
+# mat[2,]<-c(1,7,0,3,0,0)
+# mat[3,]<-c(2,0,16,6,0,1)
+# mat[4,]<-c(15,3,6,95,1,1)
+# mat[5,]<-c(0,0,0,1,1,0)
+# mat[6,]<-c(0,0,1,1,0,3)
+
+
+
+mat[1,]<-c(0.23,0.01,0.01,0.09,0,0)
+mat[2,]<-c(0.01,0.04,0,0.02,0,0)
+mat[3,]<-c(0.01,0,0.10,0.04,0,0.01)
+mat[4,]<-c(0.09,0.02,0.04,0.60,0.01,0.01)
+mat[5,]<-c(0,0,0,0.01,0.01,0)
+mat[6,]<-c(0,0,0.01,0.01,0,0.02)
+#热图
+library(ComplexHeatmap)
+library(circlize)
+library(pheatmap)
+# col_fun <- colorRamp2(
+#   c(0,1,2,3,4,5,6,7,8), 
+#   c("#2E5A87","#3E6B97","#5584B0","#6F9FC6", "#F3E0C2","#F46C58","#EB4F48","#C11A3B","#AE123A"))
+
+
+
+pheatmap(mat, border_color = "black", #边框线为黑色
+         display_numbers = TRUE,         #热图格子中显示相应的数值
+         number_color = "black",         #字体颜色为黑色
+         fontsize=10,                    #字体大小为10
+         number_format = "%0.2f",           #保留一位小数
+         color = c(colorRampPalette(c("white","yellow" ))(1),colorRampPalette(c("yellow","red" ))(50),"red")
+         #         cellwidth = 15, cellheight = 15,cluster_row = FALSE,cluster_cols = FALSE
+)    
+
+#表达热图---------------
+#TF调控因子-----------------------------#
+TF<-read.table("F:\\暑假作业\\TF调控网络.txt",header = T)
+
+
+#肺-------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\差异上调基因\\")
+up<-read.table("肺.txt",header = T)
+a<-TF[which(TF$TF %in% up$gene),]
+b<-as.data.frame(unique(a$TF)) #得到差异TF
+
+#导入发育相关恶性癌细胞
+cancer_a<-readRDS("F:\\暑假作业\\2022年暑假工作\\肺\\GSE127465（TISCH注释）\\cancer_a后.rds")
+exp_a<-cancer_a@assays$RNA@counts
+counts<-exp_a
+count<-counts[b$`unique(a$TF)`,]
+
+#转化为矩阵并对其进行归一化：
+madt<-as.matrix(count)
+lung<-madt
+
+#肝--------------------------------
+
+
+#导入发育相关恶性癌细胞
+setwd("F:\\暑假作业\\2022年暑假工作\\肝\\GEO的肝癌症数据(GSE125449)\\去批次（cytoTRANCE）\\")
+Seurat_cancer<-readRDS("Seurat_cancer.rds")
+
+table(Seurat_cancer$celltype)
+
+Seudata<-readRDS("final_seurat.rds")
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+table(Seudata$come)
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\差异上调基因\\")
+up<-read.table("肝.txt",header = T)
+a<-TF[which(TF$TF %in% up$gene),]
+b<-as.data.frame(unique(a$TF)) #得到差异TF
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "3"|substr(ab[,1],1,2) == "5"|substr(ab[,1],1,2) == "9")
+a<-ab[index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+exp_a<-cancer_a@assays$RNA@counts
+counts<-exp_a
+count<-counts[b$`unique(a$TF)`,]
+
+#转化为矩阵并对其进行归一化：
+madt<-as.matrix(count)
+liver<-madt
+
+
+
+#脑-------------------------------------
+
+getwd()
+setwd("F:\\暑假作业\\2022年暑假工作\\脑\\GSE141982_RAW\\")
+Seurat_cancer<-readRDS("Seurat_cancer.rds")
+Idents(Seurat_cancer) = 'cancer'
+Seurat_cancer<-Seurat_cancer[,Seurat_cancer$celltype=="Malignant"]
+Seudata<-readRDS("final_seurat.rds")
+
+
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\差异上调基因\\")
+up<-read.table("脑.txt",header = T)
+a<-TF[which(TF$TF %in% up$gene),]
+b<-as.data.frame(unique(a$TF)) #得到差异TF
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "11")
+a<-ab[-index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+#提取表达谱
+exp_a<-cancer_a@assays$RNA@counts
+counts<-exp_a
+count<-counts[b$`unique(a$TF)`,]
+
+#转化为矩阵并对其进行归一化：
+madt<-as.matrix(count)
+brain<-madt
+
+
+
+#肾-------------------------------------
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\差异上调基因\\")
+up<-read.table("肾.txt",header = T)
+a<-TF[which(TF$TF %in% up$gene),]
+b<-as.data.frame(unique(a$TF)) #得到差异TF
+
+cancer_a<-readRDS("F:\\暑假作业\\2022年暑假工作\\肾\\GSE171306\\cancer_a后.rds")
+
+#提取表达谱
+exp_a<-cancer_a@assays$RNA@counts
+counts<-exp_a
+count<-counts[b$`unique(a$TF)`,]
+
+#转化为矩阵并对其进行归一化：
+madt<-as.matrix(count)
+kidney<-madt
+#胃(有问题)-------------------------------------
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\差异上调基因\\")
+up<-read.table("胃.txt",header = T)
+a<-TF[which(TF$TF %in% up$gene),]
+b<-as.data.frame(unique(a$TF)) #得到差异TF
+
+
+
+cancer_a<-readRDS("F:\\暑假作业\\2022年暑假工作\\胃\\使用TISCH注释\\cancer_a后.rds")
+
+#提取表达谱
+exp_a<-cancer_a@assays$RNA@counts
+counts<-exp_a
+count<-counts[b$`unique(a$TF)`,]
+
+#转化为矩阵并对其进行归一化：
+madt<-t(as.matrix(count))
+#stomach<-t(scale(t(madt)))
+rownames(madt)[1]<-"KLF6"
+stomach<-madt
+
+#胰腺-------------------------------------
+
+
+
+
+setwd("F:/暑假作业/2022年暑假工作/胰腺/癌症/CRA001160最终版")
+Seurat_cancer<-readRDS("F:/暑假作业/2022年暑假工作/胰腺/癌症/CRA001160最终版/Seurat_cancer.rds")
+Seurat_cancer<-Seurat_cancer[,Seurat_cancer$celltype=="Malignant"]
+Seudata<-readRDS("final_seurat.rds")
+
+
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\差异上调基因\\")
+up<-read.table("胰腺.txt",header = T)
+a<-TF[which(TF$TF %in% up$gene),]
+b<-as.data.frame(unique(a$TF)) #得到差异TF
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "7"|substr(ab[,1],1,2) == "9")
+a<-ab[index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+
+#提取表达谱
+exp_a<-cancer_a@assays$RNA@counts
+counts<-exp_a
+count<-counts[b$`unique(a$TF)`,]
+
+#转化为矩阵并对其进行归一化：
+madt<-as.matrix(count)
+pancrease<-madt
+
+
+
+#保存矩阵数据----------------------------------
+
+write.csv(stomach,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\stomach_发育相关癌细胞.csv", row.names = T,quote=F)
+write.csv(pancrease,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\pancrease_发育相关癌细胞.csv", row.names = T,quote=F)
+write.csv(liver,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\liver_发育相关癌细胞.csv", row.names = T,quote=F)
+write.csv(kidney,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\kidney_发育相关癌细胞.csv", row.names = T,quote=F)
+write.csv(lung,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\lung_发育相关癌细胞.csv", row.names = T,quote=F)
+write.csv(brain,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\brain_发育相关癌细胞.csv", row.names = T,quote=F)
+#画整合的热图---------------------------------------
+
+
+stomach<-read.csv("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\stomach_发育相关癌细胞.csv")
+rownames(stomach)<-stomach$X
+stomach<-stomach[,-1]
+pancrease<-read.csv("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\pancrease_发育相关癌细胞.csv")
+rownames(pancrease)<-pancrease$X
+pancrease<-pancrease[,-1]
+liver<-read.csv("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\liver_发育相关癌细胞.csv")
+rownames(liver)<-liver$X
+liver<-liver[,-1]
+kidney<-read.csv("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\kidney_发育相关癌细胞.csv")
+rownames(kidney)<-kidney$X
+kidney<-kidney[,-1]
+lung<-read.csv("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\lung_发育相关癌细胞.csv")
+rownames(lung)<-lung$X
+lung<-lung[,-1]
+brain<-read.csv("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\TF\\热图\\brain_发育相关癌细胞.csv")
+rownames(brain)<-brain$X
+brain<-brain[,-1]
+
+
+
+
+
+
+library(plyr)
+
+#计算数据大小范围
+range(lung)
+range(liver)
+range(brain)
+range(kidney)
+range(stomach)
+range(pancrease)
+#将多张表达谱整合成一张，基因不同用0补充
+
+
+df1<-as.data.frame(lung)
+df2<-as.data.frame(liver)
+df3<-as.data.frame(brain)
+df4<-as.data.frame(kidney)
+df5<-as.data.frame(stomach)
+df6<-as.data.frame(pancrease)
+
+#提取有交集的基因
+index_kidney_lung<-intersect(rownames(kidney),rownames(lung))
+index_kidney_brain<-intersect(rownames(kidney),rownames(brain))
+index_kidney_liver<-intersect(rownames(kidney),rownames(liver))
+index_kidney_stomach<-intersect(rownames(kidney),rownames(stomach))
+index_kidney_pancrease<-intersect(rownames(kidney),rownames(pancrease))
+
+
+#肺热图---------------------
+ss<-union(rownames(df3),rownames(df2))
+#ss<-union(ss,rownames(df1))
+ss<-union(ss,rownames(df4))
+ss<-union(ss,rownames(df5))
+ss<-union(ss,rownames(df6))
+ss<-as.data.frame(ss)
+cc<-colnames(lung)
+
+index<-which(ss$ss%in%rownames(df1))
+ss<-ss[-index,]
+
+rnames <- ss
+cnames <- cc
+
+mymatrix <-as.data.frame(matrix(data = 0, nrow = length(ss), ncol = length(cc), byrow = TRUE,
+                                dimnames = list(rnames, cnames)))
+
+mymatrix<-as.matrix(rbind(lung,mymatrix))
+mymatrix_lung<-mymatrix
+# #按照基因名排序
+# new_df<-mymatrix[order(row.names(mymatrix)),]
+# 
+# range(mymatrix)
+# range(new_df)
+
+#肝热图----------------------
+
+ss<-union(rownames(df3),rownames(df1))
+#ss<-union(ss,rownames(df2))
+ss<-union(ss,rownames(df4))
+ss<-union(ss,rownames(df5))
+ss<-union(ss,rownames(df6))
+ss<-as.data.frame(ss)
+cc<-colnames(liver)
+
+index<-which(ss$ss%in%rownames(df2))
+ss<-ss[-index,]
+
+rnames <- ss
+cnames <- cc
+range(liver)
+mymatrix <-as.data.frame(matrix(data = 0, nrow = length(ss), ncol = length(cc), byrow = TRUE,
+                                dimnames = list(rnames, cnames)))
+
+mymatrix<-as.matrix(rbind(liver,mymatrix))
+mymatrix_liver<-mymatrix
+
+#按照基因名排序
+# new_df<-mymatrix[order(row.names(mymatrix)),]
+# 
+# range(mymatrix)
+# range(new_df)
+
+#脑热图-------------------------
+ss<-union(rownames(df1),rownames(df2))
+ss<-union(ss,rownames(df4))
+#ss<-union(ss,rownames(df3))
+ss<-union(ss,rownames(df5))
+ss<-union(ss,rownames(df6))
+ss<-as.data.frame(ss)
+cc<-colnames(brain)
+
+index<-which(ss$ss%in%rownames(df3))
+ss<-ss[-index,]
+
+rnames <- ss
+cnames <- cc
+range(brain)
+mymatrix <-as.data.frame(matrix(data = 0, nrow = length(ss), ncol = length(cc), byrow = TRUE,
+                                dimnames = list(rnames, cnames)))
+
+mymatrix<-as.matrix(rbind(brain,mymatrix))
+mymatrix_brain<-mymatrix
+#按照基因名排序
+# new_df<-mymatrix[order(row.names(mymatrix)),]
+# 
+# range(mymatrix)
+# range(new_df)
+
+#肾热图----------------------------
+ss<-union(rownames(df1),rownames(df2))
+ss<-union(ss,rownames(df3))
+ss<-union(ss,rownames(df5))
+#ss<-union(ss,rownames(df4))
+ss<-union(ss,rownames(df6))
+ss<-as.data.frame(ss)
+cc<-colnames(kidney)
+
+index<-which(ss$ss%in%rownames(df4))
+ss<-ss[-index,]
+
+rnames <- ss
+cnames <- cc
+range(kidney)
+mymatrix <-as.data.frame(matrix(data = 0, nrow = length(ss), ncol = length(cc), byrow = TRUE,
+                                dimnames = list(rnames, cnames)))
+
+mymatrix<-as.matrix(rbind(kidney,mymatrix))
+mymatrix_kidney<-mymatrix
+#按照基因名排序
+# new_df<-mymatrix[order(row.names(mymatrix)),]
+# 
+# range(mymatrix)
+# range(new_df)
+
+#胃热图-----------------
+ss<-union(rownames(df1),rownames(df2))
+ss<-union(ss,rownames(df3))
+ss<-union(ss,rownames(df4))
+ss<-union(ss,rownames(df6))
+#ss<-union(ss,rownames(df5))
+ss<-as.data.frame(ss)
+cc<-colnames(stomach)
+
+index<-which(ss$ss%in%rownames(df5))
+ss<-ss[-index,]
+
+rnames <- ss
+cnames <- cc
+range(stomach)
+mymatrix <-as.data.frame(matrix(data = 0, nrow = length(ss), ncol = length(cc), byrow = TRUE,
+                                dimnames = list(rnames, cnames)))
+
+mymatrix<-as.matrix(rbind(stomach,mymatrix))
+mymatrix_stomach<-mymatrix
+#按照基因名排序
+# new_df<-mymatrix[order(row.names(mymatrix)),]
+# 
+# range(mymatrix)
+# range(new_df)
+#胰腺--------------------------
+ss<-union(rownames(df1),rownames(df2))
+ss<-union(ss,rownames(df3))
+ss<-union(ss,rownames(df4))
+ss<-union(ss,rownames(df5))
+#ss<-union(ss,rownames(df6))
+ss<-as.data.frame(ss)
+cc<-colnames(pancrease)
+
+index<-which(ss$ss%in%rownames(df6))
+ss<-ss[-index,]
+
+rnames <- ss
+cnames <- cc
+range(pancrease)
+mymatrix <-as.data.frame(matrix(data = 0, nrow = length(ss), ncol = length(cc), byrow = TRUE,
+                                dimnames = list(rnames, cnames)))
+
+mymatrix<-as.matrix(rbind(pancrease,mymatrix))
+mymatrix_pancrease<-mymatrix
+#按照基因名排序
+# new_df<-mymatrix[order(row.names(mymatrix)),]
+# 
+# range(mymatrix)
+# range(new_df)
+#基因排序---------------------------------------------
+#提取所有公共基因
+
+index_kidney_lung<-intersect(rownames(df4),rownames(df1))
+index_kidney_liver<-intersect(rownames(df4),rownames(df2))
+index_kidney_brain<-intersect(rownames(df4),rownames(df3))
+index_kidney_stomach<-intersect(rownames(df4),rownames(df5))
+index_kidney_pancrease<-intersect(rownames(df4),rownames(df6))
+
+index_lung_brain<-intersect(rownames(df1),rownames(df3))
+index_lung_liver<-intersect(rownames(df1),rownames(df2))
+
+index_brain_pancrease<-intersect(rownames(df3),rownames(df6))
+
+
+com_gene<-union(union(union(union(union(union(union(index_kidney_lung,index_kidney_liver),index_kidney_brain),index_kidney_stomach),index_kidney_pancrease),
+                            index_lung_brain),index_lung_liver),index_brain_pancrease)
+
+index<-mymatrix_kidney[-which(rownames(mymatrix_kidney)%in%com_gene),]
+mymatrix_kidney <- mymatrix_kidney[c(rownames(index),com_gene),]
+
+
+
+mymatrix_lung <- mymatrix_lung[rownames(mymatrix_kidney), ]
+mymatrix_brain <- mymatrix_brain[rownames(mymatrix_kidney), ]
+mymatrix_liver <- mymatrix_liver[rownames(mymatrix_kidney), ]
+mymatrix_pancrease <- mymatrix_pancrease[rownames(mymatrix_kidney), ]
+mymatrix_stomach <- mymatrix_stomach[rownames(mymatrix_kidney), ]
+
+
+
+#作图---------------------------
+library(pheatmap)
+library(ComplexHeatmap)
+library(circlize)
+#重新定义热图颜色梯度：
+col_fun <- colorRamp2(
+  c(-4,-3,-2,-1,0,1,2,3,4), 
+  c("#FFFFF0","#FFFACD","#FFFFCC", "#F3E0C2","#FFF5EE","#F46C58","#EB4F48","#C11A3B","#AE123A"))
+
+col_fun <- colorRamp2(
+  c(0,1,2,3,4), 
+  c( "#FFF5EE","#F46C58","#EB4F48","#C11A3B","#AE123A"))
+
+pheatmap(mymatrix_kidney, name = "expression", col = col_fun,show_colnames = F,show_rownames = F,cluster_rows = F,cluster_cols = F)
+
+
+
+
+

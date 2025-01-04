@@ -1,0 +1,158 @@
+###加载包--------------------------
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library("dplyr")
+library("stats4")
+library("BiocGenerics")
+library("parallel")
+library("AnnotationDbi")
+library("GSVA")
+library("survival")
+library("survminer")
+library(scRNAseq)
+library(data.table)
+library(limma)
+library(DT)
+library(tidyverse) # ggplot2 stringer dplyr tidyr readr purrr  tibble forcats
+library(GSEABase)
+library(pheatmap)
+library(ggplot2)
+library(RColorBrewer)
+##########
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\生存分析\\33个癌症基因表达数据\\")
+name = c("ACC","BLCA","BRCA","CESC","CHOL",
+         "COAD","DLBC","ESCA",
+         "GBM","HNSC","KICH","KIRC","KIRP","LAML","LGG","LIHC",
+         "LUSC","LUAD","MESO","OV","PAAD","PCPG",
+         "PRAD","READ","SARC","SKCM","STAD","TGCT",
+         "THCA","THYM","UCS","UVM","UCEC")
+#修改基因名
+for (i in 1:length(name)) {
+  print(i) 
+  setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\生存分析\\33个癌症基因表达数据\\")
+  expname<-paste0(name[i],"_gene_count.txt")
+  exp<-read.table(expname,header = T)
+  c_name<-colnames(exp)
+  #c_name<- substr(c_name$`colnames(exp)`, start = 1, stop = 15)
+  c_name<-gsub("\\.","-",c_name)
+  colnames(exp)<- c_name
+  
+  
+  
+  genelist<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\生存分析\\60000gene_name_id带版本号对照表.txt",header=T)
+  ###环境设置.....转化基因名并且去除重复值
+  counts<-exp
+  head(counts)  #counts是需要转换ensembl_id的表达矩阵  其行名为ensembl_id
+  ##从gtf文件提取信息,获得gencode的基因id对应symbol的ids矩阵
+  ids <- data.frame(geneid=rownames(counts),
+                    median=apply(counts,1,median)) #计算基因表达中位数，用于之后排序
+  g2s <- genelist #载入从gencode的gtf文件中提取的信息文件
+  colnames(g2s) <- c("geneid","symbol")
+  table(ids$geneid %in% g2s$geneid) #查看需要转化的geneid在g2s的匹配情况
+  ids <- ids[ids$geneid %in% g2s$geneid,] #取出在gencode数据库的gtf注释中能找到的geneid
+  ids$symbol <- g2s[match(ids$geneid,g2s$geneid),2] #match返回其第二个参数中第一个参数匹配的位置,把g2s的geneid按照ids$geneid的顺序一个个取出来，从而得到ids$symbol这一列
+  ids <- ids[order(ids$symbol,ids$median,decreasing = T),] #将ids按照symbol排序，再把ids$symbol按照ids$median由大到小排序
+  
+  ##去重复
+  dim(ids); table(duplicated(ids$symbol)) #统计查看重复的symbol
+  ids <- ids[!duplicated(ids$symbol),] #取出不重复的ids$symbol
+  
+  ##转化geneid为symbol 
+  counts <- counts[rownames(ids),] #取出表达矩阵中ids有的行  
+  rownames(counts) <- ids[match(rownames(counts),ids$geneid),"symbol"]  #根据geneid和symbol进行匹配
+  exp<-counts#成功修改基因名并且去重
+  
+  
+  #导入自己的基因
+  setwd("C:\\Users\\Dell\\Desktop\\确定的图\\范玉琦\\gsva数据\\使用的hallmarker\\")
+  gene1<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\6组织上调基因并集.txt")#gene这个文件就是读取咱们所选定的基因列表，例如2000多个那个up合集，或者其他基因集。
+  
+  
+  
+  ####  GSVA  
+  #GSVA算法需要处理logCPM, logRPKM,logTPM数据或counts数据的矩阵
+  exp <- as.matrix(exp)
+  gsva_mat <- gsva(expr=exp, 
+                   gset.idx.list=gene1, 
+                   kcdf="Poisson" ,#"Gaussian" for logCPM,logRPKM,logTPM, "Poisson" for counts
+                   verbose=T)
+  gsva_mat<-as.data.frame(gsva_mat)
+  a<-t(gsva_mat)
+  a<-as.data.frame(a)
+  
+  ss<-as.data.frame(colnames(exp))
+  
+  
+  a<- tibble::rownames_to_column(a,"X")
+  a<- a[order(a$V1, decreasing = TRUE),]
+  # 从排序后的数据框中取一半的数据
+  half_length <- nrow(a) / 3
+  a_high <- head(a, half_length)
+  a_low <- tail(a,half_length)
+  exp_high<-exp[,a_high$X]
+  exp_low<-exp[,a_low$X]
+  exp<-cbind(exp_high,exp_low)
+  
+  #现在已经得到高低分组，将其他通路基因集导入开作图
+  setwd("C:\\Users\\Dell\\Desktop\\确定的图\\范玉琦\\gsva数据\\hallmarks")
+  geneSets <- getGmt("Hallmark_my_geneset.gmt")
+  a_high$V1<-"high"
+  a_low$V1<-"low"
+  mate<-rbind(a_high,a_low)
+  setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\生存分析\\hallmarker和免疫浸润最终版\\hallmarker\\")
+  write.table(mate,paste0(name[i],"_matedate.txt"),quote=F,col.name=F,row.name=F, sep = "\t")#导出注释信息
+  
+  gsva_mat <- gsva(expr=exp, 
+                   gset.idx.list=geneSets, 
+                   kcdf="Poisson" ,#"Gaussian" for logCPM,logRPKM,logTPM, "Poisson" for counts
+                   verbose=T)
+  gsva_mat<-as.data.frame(gsva_mat)
+  gsva_mat<- tibble::rownames_to_column(gsva_mat,"X")
+  #write.table(gsva_mat,paste0(name[i],"_热图.txt"), sep = "\t", row.names = FALSE,quote=F)#导出结果
+  
+  
+  #构建箱式图
+  
+  gsva_mat<-as.data.frame(t(gsva_mat))
+  gsva_mat<- tibble::rownames_to_column(gsva_mat,"X")
+  colnames(gsva_mat)<-gsva_mat[1,]
+  gsva_mat<-gsva_mat[-1,]
+  gsva_mat$X<-mate$V1
+  
+  setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\生存分析\\hallmarker和免疫浸润最终版\\hallmarker\\")
+  write.table(gsva_mat,paste0(name[i],"_箱线图.txt"), sep = "\t", row.names = FALSE,quote=F)
+  
+  
+  #免疫浸润
+  
+  immune_source<-read.csv("C:\\Users\\Dell\\Desktop\\确定的图\\范玉琦\\gsva数据\\（免疫浸润百分比数据TCGA）infiltration_estimation_for_tcga.csv",header=T)
+  
+  rownames(immune_source)<-immune_source$cell_type
+  immune_source<-immune_source[,-1]
+  
+  index <- grep("_CIBERSORT", colnames(immune_source))#选择细胞名字中包含_CIBERSORT的数据
+  immune_source<-immune_source[,index]
+  
+  index1 <- grep(".ABS", colnames(immune_source))#去除细胞名字中包含.ABS的数据
+  immune_source<-immune_source[,-index1]
+  
+  
+  name_mate<-mate$X
+  name_mate<- substr(name_mate, start = 1, stop = 15)
+  mate$X<-name_mate
+  
+  source<-immune_source[mate$X,]
+  
+  source<- tibble::rownames_to_column(source,"X")
+  source$X<-mate$V1
+  
+  setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\生存分析\\hallmarker和免疫浸润最终版\\免疫浸润\\")
+  write.table(source,paste0(name[i],"_免疫浸润比例.txt"),sep = "\t", row.names = FALSE,quote=F)
+  
+  
+
+  
+}
+
+
+

@@ -1,0 +1,2180 @@
+#lung-------------------------------------
+
+cancer_a<-readRDS("F:\\暑假作业\\2022年暑假工作\\肺\\GSE127465（TISCH注释）\\cancer_a后.rds")
+cancer_f<-readRDS("F:\\暑假作业\\2022年暑假工作\\肺\\GSE127465（TISCH注释）\\cancer_f后.rds")
+
+cancer<-merge(cancer_a,cancer_f)
+
+cancer<- NormalizeData(cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+DefaultAssay(cancer)#表示输入的是标准化后的数据
+Seudata.markers <- FindMarkers(cancer,ident.1 = "yes",ident.2 = "no",group.by = "relevance",logfc.threshold = 0.25,min.pct = 0.1,test.use = 'wilcox',)
+
+
+#提取结果
+Seudata.markers<-Seudata.markers[,c(1,2,5)]
+colnames(Seudata.markers)<-c("gene","lfc","p")
+Seudata.markers$gene<-rownames(Seudata.markers)
+
+
+write.table(Seudata.markers,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肺\\Seudata.markers.txt",sep = "\t",quote = F,row.names = F)
+df<-Seudata.markers
+df$change <- as.factor(ifelse(df$p<0.05 & abs(df$lfc)>log2(1.5),
+                              ifelse(df$lfc>log2(1.5),"Up","Down"),"Non"))
+table(df$change)
+up<-df[which(df$change=="Up"),]
+down<-df[which(df$change=="Down"),]
+
+write.table(up,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肺\\up.txt",sep = "\t",quote = F,row.names = T)
+write.table(down,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肺\\down.txt",sep = "\t",quote = F,row.names = T)
+#liver-------------------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\肝\\GEO的肝癌症数据(GSE125449)\\去批次（cytoTRANCE）\\")
+Seurat_cancer<-readRDS("Seurat_cancer.rds")
+
+table(Seurat_cancer$celltype)
+
+Seudata<-readRDS("final_seurat.rds")
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+table(Seudata$come)
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "3"|substr(ab[,1],1,2) == "5"|substr(ab[,1],1,2) == "9")
+f<-ab[-index1,]
+cancer_f<-Seurat_cancer[,rownames(f)]
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "3"|substr(ab[,1],1,2) == "5"|substr(ab[,1],1,2) == "9")
+a<-ab[index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+Idents(cancer_f) = 'f'
+Idents(cancer_a) = 'a'
+
+cancer_f$relevance<-"no"
+cancer_a$relevance<-"yes"
+
+
+
+cancer<-merge(cancer_a,cancer_f)
+
+cancer<- NormalizeData(cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+DefaultAssay(cancer)#表示输入的是标准化后的数据
+Seudata.markers <- FindMarkers(cancer,ident.1 = "yes",ident.2 = "no",group.by = "relevance",logfc.threshold = 0.25,min.pct = 0.1,test.use = 'wilcox',)
+
+
+#提取结果
+Seudata.markers<-Seudata.markers[,c(1,2,5)]
+colnames(Seudata.markers)<-c("gene","lfc","p")
+Seudata.markers$gene<-rownames(Seudata.markers)
+
+
+write.table(Seudata.markers,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肝\\Seudata.markers.txt",sep = "\t",quote = F,row.names = T)
+df<-Seudata.markers
+df$change <- as.factor(ifelse(df$p<0.05 & abs(df$lfc)>log2(1.5),
+                              ifelse(df$lfc>log2(1.5),"Up","Down"),"Non"))
+table(df$change)
+up<-df[which(df$change=="Up"),]
+down<-df[which(df$change=="Down"),]
+
+write.table(up,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肝\\up.txt",sep = "\t",quote = F,row.names = T)
+write.table(down,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肝\\down.txt",sep = "\t",quote = F,row.names = T)
+
+#brain-------------------------------------
+
+getwd()
+setwd("F:\\暑假作业\\2022年暑假工作\\脑\\GSE141982_RAW\\")
+Seurat_cancer<-readRDS("Seurat_cancer.rds")
+Idents(Seurat_cancer) = 'cancer'
+Seurat_cancer<-Seurat_cancer[,Seurat_cancer$celltype=="Malignant"]
+Seudata<-readRDS("final_seurat.rds")
+
+
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "11")
+f<-ab[index1,]
+cancer_f<-Seurat_cancer[,rownames(f)]
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "11")
+a<-ab[-index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+Idents(cancer_f) = 'f'
+Idents(cancer_a) = 'a'
+
+cancer_f$relevance<-"no"
+cancer_a$relevance<-"yes"
+
+
+cancer<-merge(cancer_a,cancer_f)
+
+cancer<- NormalizeData(cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+DefaultAssay(cancer)#表示输入的是标准化后的数据
+Seudata.markers <- FindMarkers(cancer,ident.1 = "yes",ident.2 = "no",group.by = "relevance",logfc.threshold = 0.25,min.pct = 0.1,test.use = 'wilcox',)
+
+
+#提取结果
+Seudata.markers<-Seudata.markers[,c(1,2,5)]
+colnames(Seudata.markers)<-c("gene","lfc","p")
+Seudata.markers$gene<-rownames(Seudata.markers)
+
+
+write.table(Seudata.markers,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\脑\\Seudata.markers.txt",sep = "\t",quote = F,row.names = T)
+df<-Seudata.markers
+df$change <- as.factor(ifelse(df$p<0.05 & abs(df$lfc)>log2(1.5),
+                              ifelse(df$lfc>log2(1.5),"Up","Down"),"Non"))
+table(df$change)
+up<-df[which(df$change=="Up"),]
+down<-df[which(df$change=="Down"),]
+
+write.table(up,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\脑\\up.txt",sep = "\t",quote = F,row.names = T)
+write.table(down,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\脑\\down.txt",sep = "\t",quote = F,row.names = T)
+
+
+
+#kidney-------------------------------------
+
+cancer_a<-readRDS("F:\\暑假作业\\2022年暑假工作\\肾\\GSE171306\\cancer_a后.rds")
+cancer_f<-readRDS("F:\\暑假作业\\2022年暑假工作\\肾\\GSE171306\\cancer_f后.rds")
+
+
+cancer_f$relevance<-"no"
+cancer_a$relevance<-"yes"
+
+
+cancer<-merge(cancer_a,cancer_f)
+
+cancer<- NormalizeData(cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+DefaultAssay(cancer)#表示输入的是标准化后的数据
+Seudata.markers <- FindMarkers(cancer,ident.1 = "yes",ident.2 = "no",group.by = "relevance",logfc.threshold = 0.25,min.pct = 0.1,test.use = 'wilcox',)
+
+
+#提取结果
+Seudata.markers<-Seudata.markers[,c(1,2,5)]
+colnames(Seudata.markers)<-c("gene","lfc","p")
+Seudata.markers$gene<-rownames(Seudata.markers)
+
+
+write.table(Seudata.markers,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肾\\Seudata.markers.txt",sep = "\t",quote = F,row.names = T)
+df<-Seudata.markers
+df$change <- as.factor(ifelse(df$p<0.05 & abs(df$lfc)>log2(1.5),
+                              ifelse(df$lfc>log2(1.5),"Up","Down"),"Non"))
+table(df$change)
+up<-df[which(df$change=="Up"),]
+down<-df[which(df$change=="Down"),]
+
+write.table(up,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肾\\up.txt",sep = "\t",quote = F,row.names = T)
+write.table(down,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肾\\down.txt",sep = "\t",quote = F,row.names = T)
+
+
+
+
+
+
+#stomach-------------------------------------
+
+cancer_a<-readRDS("F:\\暑假作业\\2022年暑假工作\\胃\\使用TISCH注释\\cancer_a后.rds")
+cancer_f<-readRDS("F:\\暑假作业\\2022年暑假工作\\胃\\使用TISCH注释\\cancer_f后.rds")
+
+
+cancer_f$relevance<-"no"
+cancer_a$relevance<-"yes"
+
+
+cancer<-merge(cancer_a,cancer_f)
+
+cancer<- NormalizeData(cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+DefaultAssay(cancer)#表示输入的是标准化后的数据
+Seudata.markers <- FindMarkers(cancer,ident.1 = "yes",ident.2 = "no",group.by = "relevance",logfc.threshold = 0.25,min.pct = 0.1,test.use = 'wilcox',)
+
+
+#提取结果
+Seudata.markers<-Seudata.markers[,c(1,2,5)]
+colnames(Seudata.markers)<-c("gene","lfc","p")
+Seudata.markers$gene<-rownames(Seudata.markers)
+
+
+write.table(Seudata.markers,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\胃\\Seudata.markers.txt",sep = "\t",quote = F,row.names = T)
+df<-Seudata.markers
+df$change <- as.factor(ifelse(df$p<0.05 & abs(df$lfc)>log2(1.5),
+                              ifelse(df$lfc>log2(1.5),"Up","Down"),"Non"))
+table(df$change)
+up<-df[which(df$change=="Up"),]
+down<-df[which(df$change=="Down"),]
+
+write.table(up,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\胃\\up.txt",sep = "\t",quote = F,row.names = T)
+write.table(down,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\胃\\down.txt",sep = "\t",quote = F,row.names = T)
+
+
+
+
+#pancreas-------------------------------------
+
+setwd("F:/暑假作业/2022年暑假工作/胰腺/癌症/CRA001160最终版")
+Seurat_cancer<-readRDS("F:/暑假作业/2022年暑假工作/胰腺/癌症/CRA001160最终版/Seurat_cancer.rds")
+Seurat_cancer<-Seurat_cancer[,Seurat_cancer$celltype=="Malignant"]
+Seudata<-readRDS("final_seurat.rds")
+
+
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "7"|substr(ab[,1],1,2) == "9")
+f<-ab[-index1,]
+cancer_f<-Seurat_cancer[,rownames(f)]
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "7"|substr(ab[,1],1,2) == "9")
+a<-ab[index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+Idents(cancer_f) = 'f'
+Idents(cancer_a) = 'a'
+
+cancer_f$relevance<-"no"
+cancer_a$relevance<-"yes"
+
+cancer<-merge(cancer_a,cancer_f)
+
+cancer<- NormalizeData(cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+DefaultAssay(cancer)#表示输入的是标准化后的数据
+Seudata.markers <- FindMarkers(cancer,ident.1 = "yes",ident.2 = "no",group.by = "relevance",logfc.threshold = 0.25,min.pct = 0.1,test.use = 'wilcox',)
+
+
+#提取结果
+Seudata.markers<-Seudata.markers[,c(1,2,5)]
+colnames(Seudata.markers)<-c("gene","lfc","p")
+Seudata.markers$gene<-rownames(Seudata.markers)
+
+
+write.table(Seudata.markers,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\胰腺\\Seudata.markers.txt",sep = "\t",quote = F,row.names = T)
+df<-Seudata.markers
+df$change <- as.factor(ifelse(df$p<0.05 & abs(df$lfc)>log2(1.5),
+                              ifelse(df$lfc>log2(1.5),"Up","Down"),"Non"))
+table(df$change)
+up<-df[which(df$change=="Up"),]
+down<-df[which(df$change=="Down"),]
+
+write.table(up,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\胰腺\\up.txt",sep = "\t",quote = F,row.names = T)
+write.table(down,file = "F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\胰腺\\down.txt",sep = "\t",quote = F,row.names = T)
+
+#lung-monocle-----------------------------------------
+
+# library(DDRTree)
+# library(pheatmap)
+library(monocle)
+library(patchwork)#用来做拼图的包,后面的p1lp1|p3在一张图上展示三个图就是这个包的功劳
+#Load the lung dataset
+library(tidyverse)
+# library(devtools)
+# library(harmony)
+library(Seurat) 
+# library(remotes)
+# library(patchwork)
+# library(ggplot2)
+# library(cowplot)
+# library(dplyr)
+# library(grid)
+# library(gridExtra)
+# library(data.table)
+# library(Rcpp)
+# library(SingleR) 
+
+#2构建CellDataSet对象-----------------------------------------
+#数据无细胞注释信息,我们先给他注释细胞类型
+
+setwd("F:\\暑假作业\\2022年暑假工作\\肺\\GSE127465（TISCH注释）\\")
+
+lung<-readRDS("Seurat_cancer.rds")
+
+table(lung[['celltype']])
+lung<-lung[,which(lung$celltype=="Malignant")]
+table(lung[['celltype']])
+
+
+
+
+Seudata<-readRDS("Seudata.rds")
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+table(Seudata$come)
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "12")
+f<-ab[index1,]
+lung_f<-lung[,rownames(f)]
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "12")
+a<-ab[-index2,]
+lung_a<-lung[,rownames(a)]
+
+setwd("F:\\暑假作业\\2022年暑假工作\\肺\\GSE127465（TISCH注释）\\cytoTRANCE癌症\\")
+lung<-read.table("CytoTRACE_results.txt")
+lung<-lung[order(lung$CytoTRACE,decreasing = T),]
+lung_y<-lung[1:849,]
+lung_n<-lung[850:2829,]
+
+lung_a_1<-lung_a[,rownames(lung_y)]
+lung_a_2<-lung_a[,rownames(lung_n)]
+
+lung_a<-lung_a_1
+lung_f<-merge(x=lung_f,y=lung_a_2,merge.data = F)
+
+
+
+
+
+
+lung_a$relevance<-"Y"
+lung_f$relevance<-"N"
+lung<-merge(x = lung_a, y = lung_f,merge.data = F)
+
+table(lung$relevance)
+
+
+
+
+lung[["percent.mt"]]<- PercentageFeatureSet(lung,pattern = "^MT-")
+##展示样本特性
+VlnPlot(lung, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+lung<- subset(lung, subset =  nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt<20)
+
+lung<- NormalizeData(lung, normalization.method = "LogNormalize", scale.factor = 10000) 
+lung<- FindVariableFeatures(lung, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(lung) 
+lung <- ScaleData(lung, features = all.genes) 
+lung <- ScaleData(lung,vars.to.regress = "percent.mt") 
+lung <- RunPCA(lung,features = VariableFeatures(object = lung))
+ElbowPlot(lung) 
+ndim=10#根据上图确定
+lung<- FindNeighbors(lung,dims = 1:ndim)
+lung <- FindClusters(lung,resolution = 0.5)
+lung <- RunUMAP(lung,dims = 1:ndim)
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\肺\\")
+#lung[['cell_type']]<- lung@active.ident #将注释结果添加到metadatalevels(lung)
+saveRDS(lung,file = "lung.rds ")
+
+#使用注释好的数据提取CDS对象需要的输入文件
+
+
+
+lung <- readRDS("lung.rds")#导入注释好的seurat对象（已注释)
+table(lung$relevance)
+##提取表型信息--细胞信息(建议载入细胞的聚类或者细胞类型鉴定信息、实验条件等信息)
+expr_matrix <- as(as.matrix(lung@assays$RNA@counts), "sparseMatrix")
+##提取表型信息到p_data(phenotype_data)里面
+p_data <- lung@meta.data
+#lung$orig.ident<-lung$celltype
+#p_data$celltype <- lung@active.ident#整合每个细胞的细胞鉴定信息到p_data里面。如果已经添加则不必重复添
+##提取基因信息如生物类型、gc含里等
+f_data <- data.frame(gene_short_name = row.names(lung) ,row.names = row.names(lung))
+##expr_matrix的行数与f_data的行数相同(gene number), expr_matrix的列数与p_data的行数相同(cell number)
+#构建CDS对象
+pd <- new( "AnnotatedDataFrame", data = p_data)
+fd <- new( "AnnotatedDataFrame", data = f_data)
+#将p_data和f_data从data.frame转换AnnotatedDataFrame对象。
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+
+#开始运行
+#3.估计size factor和离散度-----------------------------------------
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+
+#4.过滤低质量细胞,其实我们在前面已经过滤过细胞和基因了-----------------------------------------
+cds <- detectGenes(cds,min_expr = 0.1)#这一操作会在fData(cds)中添加一列num_cells_expressed
+print(head(fData(cds)))#此时有13714个基因
+expressed_genes <- row.names(subset(fData(cds),num_cells_expressed >= 10))#过滤掉在小于10个细胞中表达的基因,还剩11095个基因。
+#view(expressed_genes)
+
+
+
+#5.细胞分类,网站提供四种分类方法,我们使用细胞类型分类,但需要提前注释细胞-----------------------------------------
+#之前已经注释好细胞类型了
+#6.轨迹定义基因选择及可视化和构建轨迹-----------------------------------------
+#1、选择定义过程的基因
+#这三种都是无监督方法
+#降为聚类
+# ##使用seurat选择的高变基因
+# express_genes <- VariableFeatures(lung)
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering genes(cds)
+# ##使用clusters差异表达基因
+# deg.cluster <- FindAllMarkers(lung)
+# express_genes <- subset(deg.cluster,p_val_adj<0.05)$gene
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering_genes(cds)
+# ##使用monocle选择的高变基因
+# disp_table <- dispersionTable(cds)
+# disp.genes 〈- subset(disp_table,mean_expression >= 0.1 & dispersion_empirical >= 1 * dispersion_fit)$gene
+# cds <- setOrderingFilter(cds, disp.genes)
+# plot_ordering _genes(cds)
+cds$celltype
+# gene<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\差异基因\\肺.txt", header = T, sep = "\t", stringsAsFactors = F)
+# expressed_genes<-gene$gene
+#这一步输入的expressed_genes来自于步骤4。#后续分析使用的是该方法
+#也可输入seurat筛选出的高变基因:expressed_genes <- VariableFeatures(lung)
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~seurat_clusters",cores=1)
+#~后面是表示对谁做差异分析的变里,理论上可以为p_data的任意列名
+head(diff)
+
+
+
+##差异表达基因作为轨迹构建的基因,差异基因的选择标准是qval<0.01,decreasing=F表示按数值增加排序
+deg <- subset(diff,qval < 0.01)#选出2829个基因
+deg <- deg[ order(deg$qval,decreasing=F),]
+head(deg)
+
+##差异基因的结果文件保存
+#write.table(deg,file="train.monocle.DE6.xls" ,col.names=T,row.names=F ,sep="/t" ,quote=F)
+
+##轨迹构建基因可视化
+ordergene <- rownames(deg)
+cds <- setOrderingFilter(cds, ordergene)
+
+#这一步是很重要的,在我们得到想要的基因列表后,
+#我们需要使用setOrderingFilter将它嵌入cds对象,后续的一系列操作都要依赖于这个list。
+#setOrderingFilter之后,这些基因被储存在cds@featureData@data[["use_for_ordering"]],
+#可以通过table(cds@featureData@data[["use_for_ordering"]])查看
+
+
+plot_ordering_genes(cds)
+
+#出的图黑色的点表示用来构建轨迹的差异基因,灰色表示背景基因。
+#红色的线是根据第2步计算的基因表达大小和离散度分布的趋势(可以看到,找到的基因属于离散度比较高的基因)
+
+
+
+#选择排序的基因数目一般选择2000个比较合适,如果数量太多,也可以选择TOP基因
+ordergene <- row.names(deg)[order(deg$qval)][1:2000]#这样用的文献->肿瘤浸润髓系细胞的pan-cancer单细胞转录图谱
+
+#2、降维
+#使用反向图嵌入DDRTree算法降维
+cds <- reduceDimension(cds, max_components = 2,method = "DDRTree")
+
+
+#3、模拟时间轴轨迹构建和在模拟时间内排列细胞
+
+cds <- orderCells(cds,root_state = 3)
+#⚠️使用root_state参数可以设置拟时间轴的根,如下面的拟时间着色图中可以看出,左边是根。
+#根据state图可以看出,根是State1,若要想把另一端设为根,可以按如下操作
+#cds <- orderCells(cds, root_state = 5) #把State5设成拟时间轴的起始点
+
+
+#可视化:根据cds@phenoData@data中的表型信息(metadata)对细胞上色
+
+#(1)以pseudotime值上色(Pseudotime是monocle2基于细胞基因表达信息计算的概率,表示时间的先后。)
+
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE)
+
+
+#(2)以细胞类型上色
+#pdf("train.monocle.celltype.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by="celltype",size=1,show_backbone=TRUE)
+#dev.off()
+
+#(3)以细胞状态上色
+#pdf("train.monocle.state.pdf",width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "State",size=1,show_backbone=TRUE)
+#dev.off()
+
+#(4)按照seurat分群排序细胞
+#pdf( "seurat.clusters.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "seurat_clusters")
+#dev.off()
+
+#(5)以细胞状态上色（拆分）“分面”轨迹图,以便更容易地查看每个状态的位置。
+#pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "State") + facet_wrap("~State", nrow = 1)
+#dev.off()
+
+#(6)以相关性上色
+
+
+cell_colors<- c("#F9D23C", "#ED97CA")
+plot_cell_trajectory(cds,color_by = "relevance",size=1,show_backbone=TRUE)+ scale_color_manual(values=cell_colors)
+
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\肺")
+saveRDS(cds,"lung_cds.rds")
+cds<-readRDS("lung_cds.rds")
+
+
+#liver-monocle-----------------------------------------
+
+# library(DDRTree)
+# library(pheatmap)
+library(monocle)
+library(patchwork)#用来做拼图的包,后面的p1lp1|p3在一张图上展示三个图就是这个包的功劳
+#Load the liver dataset
+library(tidyverse)
+# library(devtools)
+# library(harmony)
+library(Seurat) 
+# library(remotes)
+# library(patchwork)
+# library(ggplot2)
+# library(cowplot)
+# library(dplyr)
+# library(grid)
+# library(gridExtra)
+# library(data.table)
+# library(Rcpp)
+# library(SingleR) 
+
+#2构建CellDataSet对象-----------------------------------------
+
+setwd("F:\\暑假作业\\2022年暑假工作\\肝\\GEO的肝癌症数据(GSE125449)\\去批次（cytoTRANCE）\\")
+
+liver<-readRDS("cancer_seurat(未删细胞).rds")
+
+table(liver[['celltype']])
+liver<-liver[,which(liver$celltype=="Malignant cell")]
+table(liver[['celltype']])
+
+
+
+
+Seudata<-readRDS("final_seurat.rds")
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+table(Seudata$come)
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+
+
+#70%
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "5")
+f<-ab[-index1,]
+liver_f<-liver[,rownames(f)]
+liver_f$relevance_70<-"N"
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "5")
+a<-ab[index2,]
+liver_a<-liver[,rownames(a)]
+liver_a$relevance_70<-"Y"
+
+liver<-merge(x = liver_a, y = liver_f,merge.data = F)
+
+table(liver$relevance_70)
+
+
+#80%
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "3"|substr(ab[,1],1,2) == "5"|substr(ab[,1],1,2) == "9")
+f<-ab[-index1,]
+liver_f<-liver[,rownames(f)]
+liver_f$relevance_80<-"N"
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "3"|substr(ab[,1],1,2) == "5"|substr(ab[,1],1,2) == "9")
+a<-ab[index2,]
+liver_a<-liver[,rownames(a)]
+liver_a$relevance_80<-"Y"
+
+liver<-merge(x = liver_a, y = liver_f,merge.data = F)
+
+
+
+
+
+table(liver$relevance_80)
+
+
+
+liver[["percent.mt"]]<- PercentageFeatureSet(liver,pattern = "^MT-")
+##展示样本特性
+VlnPlot(liver, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+liver<- subset(liver, subset =  nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt<20)
+
+liver<- NormalizeData(liver, normalization.method = "LogNormalize", scale.factor = 10000) 
+liver<- FindVariableFeatures(liver, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(liver) 
+liver <- ScaleData(liver, features = all.genes) 
+liver <- ScaleData(liver,vars.to.regress = "percent.mt") 
+liver <- RunPCA(liver,features = VariableFeatures(object = liver))
+ElbowPlot(liver) 
+ndim=5#根据上图确定
+liver<- FindNeighbors(liver,dims = 1:ndim)
+liver <- FindClusters(liver,resolution = 0.5)
+liver <- RunUMAP(liver,dims = 1:ndim)
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\肝\\")
+#liver[['cell_type']]<- liver@active.ident #将注释结果添加到metadatalevels(liver)
+saveRDS(liver,file = "liver.rds ")
+
+#使用注释好的数据提取CDS对象需要的输入文件
+
+liver <- readRDS("liver.rds")#导入注释好的seurat对象（已注释)
+##提取表型信息--细胞信息(建议载入细胞的聚类或者细胞类型鉴定信息、实验条件等信息)
+expr_matrix <- as(as.matrix(liver@assays$RNA@counts), "sparseMatrix")
+##提取表型信息到p_data(phenotype_data)里面
+p_data <- liver@meta.data
+#liver$orig.ident<-liver$celltype
+#p_data$celltype <- liver@active.ident#整合每个细胞的细胞鉴定信息到p_data里面。如果已经添加则不必重复添
+##提取基因信息如生物类型、gc含里等
+f_data <- data.frame(gene_short_name = row.names(liver) ,row.names = row.names(liver))
+##expr_matrix的行数与f_data的行数相同(gene number), expr_matrix的列数与p_data的行数相同(cell number)
+#构建CDS对象
+pd <- new( "AnnotatedDataFrame", data = p_data)
+fd <- new( "AnnotatedDataFrame", data = f_data)
+#将p_data和f_data从data.frame转换AnnotatedDataFrame对象。
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+
+#开始运行
+#3.估计size factor和离散度-----------------------------------------
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+
+#4.过滤低质量细胞,其实我们在前面已经过滤过细胞和基因了-----------------------------------------
+cds <- detectGenes(cds,min_expr = 0.1)#这一操作会在fData(cds)中添加一列num_cells_expressed
+print(head(fData(cds)))#此时有13714个基因
+expressed_genes <- row.names(subset(fData(cds),num_cells_expressed >= 10))#过滤掉在小于10个细胞中表达的基因,还剩11095个基因。
+
+#5.细胞分类,网站提供四种分类方法,我们使用细胞类型分类,但需要提前注释细胞-----------------------------------------
+#之前已经注释好细胞类型了
+#6.轨迹定义基因选择及可视化和构建轨迹-----------------------------------------
+#1、选择定义过程的基因
+#这三种都是无监督方法
+#降为聚类
+# ##使用seurat选择的高变基因
+# express_genes <- VariableFeatures(liver)
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering genes(cds)
+# ##使用clusters差异表达基因
+# deg.cluster <- FindAllMarkers(liver)
+# express_genes <- subset(deg.cluster,p_val_adj<0.05)$gene
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering_genes(cds)
+# ##使用monocle选择的高变基因
+# disp_table <- dispersionTable(cds)
+# disp.genes 〈- subset(disp_table,mean_expression >= 0.1 & dispersion_empirical >= 1 * dispersion_fit)$gene
+# cds <- setOrderingFilter(cds, disp.genes)
+# plot_ordering _genes(cds)
+cds$celltype
+
+#这一步输入的expressed_genes来自于步骤4。#后续分析使用的是该方法
+#也可输入seurat筛选出的高变基因:expressed_genes <- VariableFeatures(liver)
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~seurat_clusters",cores=1)
+#~后面是表示对谁做差异分析的变里,理论上可以为p_data的任意列名
+head(diff)
+
+
+
+##差异表达基因作为轨迹构建的基因,差异基因的选择标准是qval<0.01,decreasing=F表示按数值增加排序
+deg <- subset(diff,qval < 0.01)#选出2829个基因
+deg <- deg[ order(deg$qval,decreasing=F),]
+head(deg)
+
+##差异基因的结果文件保存
+#write.table(deg,file="train.monocle.DE6.xls" ,col.names=T,row.names=F ,sep="/t" ,quote=F)
+
+##轨迹构建基因可视化
+ordergene <- rownames(deg)
+cds <- setOrderingFilter(cds, ordergene)
+
+#这一步是很重要的,在我们得到想要的基因列表后,
+#我们需要使用setOrderingFilter将它嵌入cds对象,后续的一系列操作都要依赖于这个list。
+#setOrderingFilter之后,这些基因被储存在cds@featureData@data[["use_for_ordering"]],
+#可以通过table(cds@featureData@data[["use_for_ordering"]])查看
+
+
+
+#pdf("train.ordergenes.pdf")
+plot_ordering_genes(cds)
+#dev.off()
+#出的图黑色的点表示用来构建轨迹的差异基因,灰色表示背景基因。
+#红色的线是根据第2步计算的基因表达大小和离散度分布的趋势(可以看到,找到的基因属于离散度比较高的基因)
+
+
+
+#选择排序的基因数目一般选择2000个比较合适,如果数量太多,也可以选择TOP基因
+ordergene <- row.names(deg)[order(deg$qval)][1:2000]#这样用的文献->肿瘤浸润髓系细胞的pan-cancer单细胞转录图谱
+
+#2、降维
+#使用反向图嵌入DDRTree算法降维
+cds <- reduceDimension(cds, max_components = 2,method = "DDRTree")
+
+
+#3、模拟时间轴轨迹构建和在模拟时间内排列细胞
+
+cds <- orderCells(cds,root_state = 3)
+#⚠️使用root_state参数可以设置拟时间轴的根,如下面的拟时间着色图中可以看出,左边是根。
+#根据state图可以看出,根是State1,若要想把另一端设为根,可以按如下操作
+#cds <- orderCells(cds, root_state = 5) #把State5设成拟时间轴的起始点
+
+
+#可视化:根据cds@phenoData@data中的表型信息(metadata)对细胞上色
+
+#(1)以pseudotime值上色(Pseudotime是monocle2基于细胞基因表达信息计算的概率,表示时间的先后。)
+#pdf("train.monocle.pseudotime. pdf" ,width = 7,height - 7)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE)
+#dev.offO()
+
+#(2)以细胞类型上色
+#pdf("train.monocle.celltype.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by="celltype",size=1,show_backbone=TRUE)
+#dev.off()
+
+#(3)以细胞状态上色
+#pdf("train.monocle.state.pdf",width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "State",size=1,show_backbone=TRUE)
+#dev.off()
+
+#(4)按照seurat分群排序细胞
+#pdf( "seurat.clusters.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "seurat_clusters")
+#dev.off()
+
+#(5)以细胞状态上色（拆分）“分面”轨迹图,以便更容易地查看每个状态的位置。
+#pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "State") + facet_wrap("~State", nrow = 1)
+#dev.off()
+
+#(6)以相关性上色
+#pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "relevance_70",size=1,show_backbone=TRUE)
+cell_colors<-c("#FFC871", "#F06719")
+plot_cell_trajectory(cds,color_by = "relevance_80",size=1,show_backbone=TRUE)+ scale_color_manual(values=cell_colors)
+#dev.off()
+
+
+saveRDS(cds,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\肝\\cds.rds")
+cds<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\肝\\cds.rds")
+
+#brain-monocle-----------------------------------------
+
+# library(DDRTree)
+# library(pheatmap)
+library(monocle)
+library(patchwork)#用来做拼图的包,后面的p1lp1|p3在一张图上展示三个图就是这个包的功劳
+#Load the brain dataset
+library(tidyverse)
+# library(devtools)
+# library(harmony)
+library(Seurat) 
+# library(remotes)
+# library(patchwork)
+# library(ggplot2)
+# library(cowplot)
+# library(dplyr)
+# library(grid)
+# library(gridExtra)
+# library(data.table)
+# library(Rcpp)
+# library(SingleR) 
+
+#2构建CellDataSet对象-----------------------------------------
+#数据无细胞注释信息,我们先给他注释细胞类型
+
+brain<-readRDS("F:\\暑假作业\\2022年暑假工作\\脑\\GSE141982_RAW\\Seurat_cancer_allcell.rds")
+
+table(brain[['celltype']])
+brain<-brain[,which(brain$celltype=="Malignant")]
+table(brain[['celltype']])
+
+
+
+setwd("F:\\暑假作业\\2022年暑假工作\\脑\\GSE141982_RAW\\\\")
+Seudata<-readRDS("final_seurat.rds")
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+table(Seudata$come)
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "11")
+f<-ab[index1,]
+brain_f<-brain[,rownames(f)]
+brain_f$relevance<-"N"
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "11")
+a<-ab[-index2,]
+brain_a<-brain[,rownames(a)]
+brain_a$relevance<-"Y"
+
+brain<-merge(x = brain_a, y = brain_f,merge.data = F)
+table(brain$relevance)
+
+
+
+brain[["percent.mt"]]<- PercentageFeatureSet(brain,pattern = "^MT-")
+##展示样本特性
+VlnPlot(brain, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+brain<- subset(brain, subset =  nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt<15)
+
+brain<- NormalizeData(brain, normalization.method = "LogNormalize", scale.factor = 10000) 
+brain<- FindVariableFeatures(brain, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(brain) 
+brain <- ScaleData(brain, features = all.genes) 
+brain <- ScaleData(brain,vars.to.regress = "percent.mt") 
+brain <- RunPCA(brain,features = VariableFeatures(object = brain))
+ElbowPlot(brain) 
+ndim=10#根据上图确定
+brain<- FindNeighbors(brain,dims = 1:ndim)
+brain <- FindClusters(brain,resolution = 0.5)
+brain <- RunUMAP(brain,dims = 1:ndim)
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\脑")
+#brain[['cell_type']]<- brain@active.ident #将注释结果添加到metadatalevels(brain)
+saveRDS(brain,file = "brain.rds ")
+
+#使用注释好的数据提取CDS对象需要的输入文件
+
+brain <- readRDS("brain.rds")#导入注释好的seurat对象（已注释)
+##提取表型信息--细胞信息(建议载入细胞的聚类或者细胞类型鉴定信息、实验条件等信息)
+expr_matrix <- as(as.matrix(brain@assays$RNA@counts), "sparseMatrix")
+##提取表型信息到p_data(phenotype_data)里面
+p_data <- brain@meta.data
+#brain$orig.ident<-brain$celltype
+#p_data$celltype <- brain@active.ident#整合每个细胞的细胞鉴定信息到p_data里面。如果已经添加则不必重复添
+##提取基因信息如生物类型、gc含里等
+f_data <- data.frame(gene_short_name = row.names(brain) ,row.names = row.names(brain))
+##expr_matrix的行数与f_data的行数相同(gene number), expr_matrix的列数与p_data的行数相同(cell number)
+#构建CDS对象
+pd <- new( "AnnotatedDataFrame", data = p_data)
+fd <- new( "AnnotatedDataFrame", data = f_data)
+#将p_data和f_data从data.frame转换AnnotatedDataFrame对象。
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+
+#开始运行
+#3.估计size factor和离散度-----------------------------------------
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+
+#4.过滤低质量细胞,其实我们在前面已经过滤过细胞和基因了-----------------------------------------
+cds <- detectGenes(cds,min_expr = 0.1)#这一操作会在fData(cds)中添加一列num_cells_expressed
+print(head(fData(cds)))#此时有13714个基因
+expressed_genes <- row.names(subset(fData(cds),num_cells_expressed >= 10))#过滤掉在小于10个细胞中表达的基因,还剩11095个基因。
+
+#5.细胞分类,网站提供四种分类方法,我们使用细胞类型分类,但需要提前注释细胞-----------------------------------------
+#之前已经注释好细胞类型了
+#6.轨迹定义基因选择及可视化和构建轨迹-----------------------------------------
+#1、选择定义过程的基因
+#这三种都是无监督方法
+#降为聚类
+# ##使用seurat选择的高变基因
+# express_genes <- VariableFeatures(brain)
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering genes(cds)
+# ##使用clusters差异表达基因
+# deg.cluster <- FindAllMarkers(brain)
+# express_genes <- subset(deg.cluster,p_val_adj<0.05)$gene
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering_genes(cds)
+# ##使用monocle选择的高变基因
+# disp_table <- dispersionTable(cds)
+# disp.genes 〈- subset(disp_table,mean_expression >= 0.1 & dispersion_empirical >= 1 * dispersion_fit)$gene
+# cds <- setOrderingFilter(cds, disp.genes)
+# plot_ordering _genes(cds)
+cds$celltype
+
+#这一步输入的expressed_genes来自于步骤4。#后续分析使用的是该方法
+#也可输入seurat筛选出的高变基因:expressed_genes <- VariableFeatures(brain)
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~seurat_clusters",cores=1)
+#~后面是表示对谁做差异分析的变里,理论上可以为p_data的任意列名
+head(diff)
+
+
+
+##差异表达基因作为轨迹构建的基因,差异基因的选择标准是qval<0.01,decreasing=F表示按数值增加排序
+deg <- subset(diff,qval < 0.01)#选出2829个基因
+deg <- deg[ order(deg$qval,decreasing=F),]
+head(deg)
+
+##差异基因的结果文件保存
+write.table(deg,file="train.monocle.DE6.xls" ,col.names=T,row.names=F ,sep="/t" ,quote=F)
+
+##轨迹构建基因可视化
+ordergene <- rownames(deg)
+cds <- setOrderingFilter(cds, ordergene)
+
+#这一步是很重要的,在我们得到想要的基因列表后,
+#我们需要使用setOrderingFilter将它嵌入cds对象,后续的一系列操作都要依赖于这个list。
+#setOrderingFilter之后,这些基因被储存在cds@featureData@data[["use_for_ordering"]],
+#可以通过table(cds@featureData@data[["use_for_ordering"]])查看
+
+
+
+pdf("train.ordergenes.pdf")
+plot_ordering_genes(cds)
+dev.off()
+#出的图黑色的点表示用来构建轨迹的差异基因,灰色表示背景基因。
+#红色的线是根据第2步计算的基因表达大小和离散度分布的趋势(可以看到,找到的基因属于离散度比较高的基因)
+
+
+
+#选择排序的基因数目一般选择2000个比较合适,如果数量太多,也可以选择TOP基因
+ordergene <- row.names(deg)[order(deg$qval)][1:2000]#这样用的文献->肿瘤浸润髓系细胞的pan-cancer单细胞转录图谱
+
+#2、降维
+#使用反向图嵌入DDRTree算法降维
+cds <- reduceDimension(cds, max_components = 2,method = "DDRTree")
+
+
+#3、模拟时间轴轨迹构建和在模拟时间内排列细胞
+
+cds <- orderCells(cds)
+#⚠️使用root_state参数可以设置拟时间轴的根,如下面的拟时间着色图中可以看出,左边是根。
+#根据state图可以看出,根是State1,若要想把另一端设为根,可以按如下操作
+#cds <- orderCells(cds, root_state = 5) #把State5设成拟时间轴的起始点
+
+
+#可视化:根据cds@phenoData@data中的表型信息(metadata)对细胞上色
+
+#(1)以pseudotime值上色(Pseudotime是monocle2基于细胞基因表达信息计算的概率,表示时间的先后。)
+pdf("train.monocle.pseudotime. pdf" ,width = 7,height - 7)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE)
+dev.offO()
+
+#(2)以细胞类型上色
+pdf("train.monocle.celltype.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by="celltype",size=1,show_backbone=TRUE)
+dev.off()
+
+#(3)以细胞状态上色
+pdf("train.monocle.state.pdf",width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "State",size=1,show_backbone=TRUE)
+dev.off()
+
+#(4)按照seurat分群排序细胞
+pdf( "seurat.clusters.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "seurat_clusters")
+dev.off()
+
+#(5)以细胞状态上色（拆分）“分面”轨迹图,以便更容易地查看每个状态的位置。
+pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "State") + facet_wrap("~State", nrow = 1)
+dev.off()
+
+#(6)以相关性上色
+pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "relevance",size=1,show_backbone=TRUE)
+dev.off()
+
+
+saveRDS(cds,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\脑\\cds.rds")
+cds<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\脑\\cds.rds")
+
+
+#kidney-monocle-----------------------------------------
+
+# library(DDRTree)
+# library(pheatmap)
+library(monocle)
+library(patchwork)#用来做拼图的包,后面的p1lp1|p3在一张图上展示三个图就是这个包的功劳
+#Load the kidney dataset
+library(tidyverse)
+# library(devtools)
+# library(harmony)
+library(Seurat) 
+# library(remotes)
+# library(patchwork)
+# library(ggplot2)
+# library(cowplot)
+# library(dplyr)
+# library(grid)
+# library(gridExtra)
+# library(data.table)
+# library(Rcpp)
+# library(SingleR) 
+
+#2构建CellDataSet对象-----------------------------------------
+#数据无细胞注释信息,我们先给他注释细胞类型
+
+setwd("F:\\暑假作业\\2022年暑假工作\\肾\\GSE171306\\")
+
+kidney<-readRDS("Seurat_cancer.rds")
+
+table(kidney[['celltype']])
+kidney<-kidney[,which(kidney$celltype=="Malignant")]
+table(kidney[['celltype']])
+
+
+
+
+Seudata<-readRDS("final_seurat.rds")
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+table(Seudata$come)
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+
+
+# #70%
+# #发育不相关
+# index1 <- which(substr(ab[,1],1,2) == "5"|substr(ab[,1],1,2) == "8"|substr(ab[,1],1,2) == "14")
+# f<-ab[index1,]
+# kidney_f<-kidney[,rownames(f)]
+# kidney_f$relevance_70<-"N"
+# 
+# #发育相关a
+# index2 <- which(substr(ab[,1],1,2) == "5"|substr(ab[,1],1,2) == "8"|substr(ab[,1],1,2) == "14")
+# a<-ab[-index2,]
+# kidney_a<-kidney[,rownames(a)]
+# kidney_a$relevance_70<-"Y"
+# 
+# kidney<-merge(x = kidney_a, y = kidney_f,merge.data = F)
+# 
+# table(kidney$relevance_70)
+# 
+
+#80%
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "8"|substr(ab[,1],1,2) == "14")
+f<-ab[index1,]
+kidney_f<-kidney[,rownames(f)]
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "8"|substr(ab[,1],1,2) == "14")
+a<-ab[-index2,]
+kidney_a<-kidney[,rownames(a)]
+
+setwd("F:\\暑假作业\\2022年暑假工作\\肾\\GSE171306\\cytoTRANCE癌症\\")
+kidney<-read.table("CytoTRACE_results.txt")
+kidney$name<-rownames(kidney)
+
+
+for (i in 1:1009) {
+  
+  kidney[i,8]<-gsub(".1", "-1", kidney[i,8])#将.txt变成空
+  print(i)
+}
+
+
+
+
+kidney<-kidney[order(kidney$CytoTRACE,decreasing = T),]
+kidney_y<-kidney[1:303,]
+kidney_n<-kidney[304:1009,]
+
+kidney_a_1<-kidney_a[,kidney_y$name]
+kidney_a_2<-kidney_a[,kidney_n$name]
+
+kidney_a<-kidney_a_1
+kidney_f<-merge(x=kidney_f,y=kidney_a_2,merge.data = F)
+
+
+
+kidney_f$relevance_80<-"N"
+kidney_a$relevance_80<-"Y"
+
+kidney<-merge(x = kidney_a, y = kidney_f,merge.data = F)
+
+
+
+
+
+table(kidney$relevance_80)
+
+
+
+kidney[["percent.mt"]]<- PercentageFeatureSet(kidney,pattern = "^MT-")
+##展示样本特性
+VlnPlot(kidney, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+kidney<- subset(kidney, subset =  nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt<25)
+
+kidney<- NormalizeData(kidney, normalization.method = "LogNormalize", scale.factor = 10000) 
+kidney<- FindVariableFeatures(kidney, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(kidney) 
+kidney <- ScaleData(kidney, features = all.genes) 
+kidney <- ScaleData(kidney,vars.to.regress = "percent.mt") 
+kidney <- RunPCA(kidney,features = VariableFeatures(object = kidney))
+ElbowPlot(kidney) 
+ndim=5#根据上图确定
+kidney<- FindNeighbors(kidney,dims = 1:ndim)
+kidney <- FindClusters(kidney,resolution = 0.5)
+kidney <- RunUMAP(kidney,dims = 1:ndim)
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\肾\\")
+#kidney[['cell_type']]<- kidney@active.ident #将注释结果添加到metadatalevels(kidney)
+saveRDS(kidney,file = "kidney.rds ")
+
+#使用注释好的数据提取CDS对象需要的输入文件
+
+kidney <- readRDS("kidney.rds")#导入注释好的seurat对象（已注释)
+##提取表型信息--细胞信息(建议载入细胞的聚类或者细胞类型鉴定信息、实验条件等信息)
+expr_matrix <- as(as.matrix(kidney@assays$RNA@counts), "sparseMatrix")
+##提取表型信息到p_data(phenotype_data)里面
+p_data <- kidney@meta.data
+#kidney$orig.ident<-kidney$celltype
+#p_data$celltype <- kidney@active.ident#整合每个细胞的细胞鉴定信息到p_data里面。如果已经添加则不必重复添
+##提取基因信息如生物类型、gc含里等
+f_data <- data.frame(gene_short_name = row.names(kidney) ,row.names = row.names(kidney))
+##expr_matrix的行数与f_data的行数相同(gene number), expr_matrix的列数与p_data的行数相同(cell number)
+#构建CDS对象
+pd <- new( "AnnotatedDataFrame", data = p_data)
+fd <- new( "AnnotatedDataFrame", data = f_data)
+#将p_data和f_data从data.frame转换AnnotatedDataFrame对象。
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+
+#开始运行
+#3.估计size factor和离散度-----------------------------------------
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+
+#4.过滤低质量细胞,其实我们在前面已经过滤过细胞和基因了-----------------------------------------
+cds <- detectGenes(cds,min_expr = 0.1)#这一操作会在fData(cds)中添加一列num_cells_expressed
+print(head(fData(cds)))#此时有13714个基因
+expressed_genes <- row.names(subset(fData(cds),num_cells_expressed >= 10))#过滤掉在小于10个细胞中表达的基因,还剩11095个基因。
+
+#5.细胞分类,网站提供四种分类方法,我们使用细胞类型分类,但需要提前注释细胞-----------------------------------------
+#之前已经注释好细胞类型了
+#6.轨迹定义基因选择及可视化和构建轨迹-----------------------------------------
+#1、选择定义过程的基因
+#这三种都是无监督方法
+#降为聚类
+# ##使用seurat选择的高变基因
+# express_genes <- VariableFeatures(kidney)
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering genes(cds)
+# ##使用clusters差异表达基因
+# deg.cluster <- FindAllMarkers(kidney)
+# express_genes <- subset(deg.cluster,p_val_adj<0.05)$gene
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering_genes(cds)
+# ##使用monocle选择的高变基因
+# disp_table <- dispersionTable(cds)
+# disp.genes 〈- subset(disp_table,mean_expression >= 0.1 & dispersion_empirical >= 1 * dispersion_fit)$gene
+# cds <- setOrderingFilter(cds, disp.genes)
+# plot_ordering _genes(cds)
+cds$celltype
+
+#这一步输入的expressed_genes来自于步骤4。#后续分析使用的是该方法
+#也可输入seurat筛选出的高变基因:expressed_genes <- VariableFeatures(kidney)
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~seurat_clusters",cores=1)
+#~后面是表示对谁做差异分析的变里,理论上可以为p_data的任意列名
+head(diff)
+
+
+
+##差异表达基因作为轨迹构建的基因,差异基因的选择标准是qval<0.01,decreasing=F表示按数值增加排序
+deg <- subset(diff,qval < 0.01)#选出2829个基因
+deg <- deg[ order(deg$qval,decreasing=F),]
+head(deg)
+
+##差异基因的结果文件保存
+#write.table(deg,file="train.monocle.DE6.xls" ,col.names=T,row.names=F ,sep="/t" ,quote=F)
+
+##轨迹构建基因可视化
+ordergene <- rownames(deg)
+cds <- setOrderingFilter(cds, ordergene)
+
+#这一步是很重要的,在我们得到想要的基因列表后,
+#我们需要使用setOrderingFilter将它嵌入cds对象,后续的一系列操作都要依赖于这个list。
+#setOrderingFilter之后,这些基因被储存在cds@featureData@data[["use_for_ordering"]],
+#可以通过table(cds@featureData@data[["use_for_ordering"]])查看
+
+
+
+#pdf("train.ordergenes.pdf")
+plot_ordering_genes(cds)
+#dev.off()
+#出的图黑色的点表示用来构建轨迹的差异基因,灰色表示背景基因。
+#红色的线是根据第2步计算的基因表达大小和离散度分布的趋势(可以看到,找到的基因属于离散度比较高的基因)
+
+
+
+#选择排序的基因数目一般选择2000个比较合适,如果数量太多,也可以选择TOP基因
+ordergene <- row.names(deg)[order(deg$qval)][1:2000]#这样用的文献->肿瘤浸润髓系细胞的pan-cancer单细胞转录图谱
+
+#2、降维
+#使用反向图嵌入DDRTree算法降维
+cds <- reduceDimension(cds, max_components = 2,method = "DDRTree")
+
+
+#3、模拟时间轴轨迹构建和在模拟时间内排列细胞
+
+cds <- orderCells(cds,root_state = 3)
+#⚠️使用root_state参数可以设置拟时间轴的根,如下面的拟时间着色图中可以看出,左边是根。
+#根据state图可以看出,根是State1,若要想把另一端设为根,可以按如下操作
+#cds <- orderCells(cds, root_state = 5) #把State5设成拟时间轴的起始点
+
+
+#可视化:根据cds@phenoData@data中的表型信息(metadata)对细胞上色
+
+#(1)以pseudotime值上色(Pseudotime是monocle2基于细胞基因表达信息计算的概率,表示时间的先后。)
+#pdf("train.monocle.pseudotime. pdf" ,width = 7,height - 7)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE)
+#dev.offO()
+
+#(2)以细胞类型上色
+#pdf("train.monocle.celltype.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by="celltype",size=1,show_backbone=TRUE)
+#dev.off()
+
+#(3)以细胞状态上色
+#pdf("train.monocle.state.pdf",width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "State",size=1,show_backbone=TRUE)
+#dev.off()
+
+#(4)按照seurat分群排序细胞
+#pdf( "seurat.clusters.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "seurat_clusters")
+#dev.off()
+
+#(5)以细胞状态上色（拆分）“分面”轨迹图,以便更容易地查看每个状态的位置。
+#pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "State") + facet_wrap("~State", nrow = 1)
+#dev.off()
+
+#(6)以相关性上色
+#pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "relevance_70",size=1,show_backbone=TRUE)
+
+cell_colors<- c("#98DF8A", "#008A43")
+plot_cell_trajectory(cds,color_by = "relevance_80",size=1,show_backbone=TRUE)+ scale_color_manual(values=cell_colors)
+#dev.off()
+
+
+saveRDS(cds,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\肾\\kidney_cds.rds")
+cds<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\肾\\kidney_cds.rds")
+
+
+
+#stomach-monocle-----------------------------------------
+
+# library(DDRTree)
+# library(pheatmap)
+library(monocle)
+library(patchwork)#用来做拼图的包,后面的p1lp1|p3在一张图上展示三个图就是这个包的功劳
+#Load the stomach dataset
+library(tidyverse)
+# library(devtools)
+# library(harmony)
+library(Seurat) 
+# library(remotes)
+# library(patchwork)
+# library(ggplot2)
+# library(cowplot)
+# library(dplyr)
+# library(grid)
+# library(gridExtra)
+# library(data.table)
+# library(Rcpp)
+# library(SingleR) 
+
+#2构建CellDataSet对象-----------------------------------------
+#数据无细胞注释信息,我们先给他注释细胞类型
+
+setwd("F:\\暑假作业\\2022年暑假工作\\胃\\使用TISCH注释\\")
+
+stomach<-readRDS("Seurat_cancer.rds")
+
+table(stomach[['celltype']])
+stomach<-stomach[,which(stomach$celltype=="Malignant")]
+table(stomach[['celltype']])
+
+
+
+
+Seudata<-readRDS("final_seurat.rds")
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+table(Seudata$come)
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "9")
+f<-ab[index1,]
+stomach_f<-stomach[,rownames(f)]
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "9")
+a<-ab[-index2,]
+stomach_a<-stomach[,rownames(a)]
+
+
+setwd("F:\\暑假作业\\2022年暑假工作\\胃\\使用TISCH注释\\cytoTRANCE癌症\\")
+stomach<-read.table("CytoTRACE_results.txt")
+stomach$name<-rownames(stomach)
+
+
+for (i in 1:479) {
+  
+  stomach[i,8]<-gsub("[.]", "-", stomach[i,8])#.会自动识别成所有字符，所以需要加【】来转义
+  print(i)
+}
+
+
+
+
+stomach<-stomach[order(stomach$CytoTRACE,decreasing = T),]
+stomach_y<-stomach[1:144,]
+stomach_n<-stomach[145:479,]
+
+
+
+stomach_a_1<-stomach_a[,stomach_y$name]
+stomach_a_2<-stomach_a[,stomach_n$name]
+
+stomach_a<-stomach_a_1
+stomach_f<-merge(x=stomach_f,y=stomach_a_2,merge.data = F)
+
+
+stomach_f$relevance<-"N"
+stomach_a$relevance<-"Y"
+
+stomach<-merge(x = stomach_a, y = stomach_f,merge.data = F)
+
+table(stomach$relevance)
+
+
+
+
+stomach[["percent.mt"]]<- PercentageFeatureSet(stomach,pattern = "^MT-")
+##展示样本特性
+VlnPlot(stomach, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+stomach<- subset(stomach, subset =  nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt<10)
+
+stomach<- NormalizeData(stomach, normalization.method = "LogNormalize", scale.factor = 10000) 
+stomach<- FindVariableFeatures(stomach, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(stomach) 
+stomach <- ScaleData(stomach, features = all.genes) 
+stomach <- ScaleData(stomach,vars.to.regress = "percent.mt") 
+stomach <- RunPCA(stomach,features = VariableFeatures(object = stomach))
+ElbowPlot(stomach) 
+ndim=15#根据上图确定
+stomach<- FindNeighbors(stomach,dims = 1:ndim)
+stomach <- FindClusters(stomach,resolution = 0.5)
+stomach <- RunUMAP(stomach,dims = 1:ndim)
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\胃\\")
+#stomach[['cell_type']]<- stomach@active.ident #将注释结果添加到metadatalevels(stomach)
+saveRDS(stomach,file = "stomach.rds ")
+
+#使用注释好的数据提取CDS对象需要的输入文件
+
+stomach <- readRDS("stomach.rds")#导入注释好的seurat对象（已注释)
+##提取表型信息--细胞信息(建议载入细胞的聚类或者细胞类型鉴定信息、实验条件等信息)
+expr_matrix <- as(as.matrix(stomach@assays$RNA@counts), "sparseMatrix")
+##提取表型信息到p_data(phenotype_data)里面
+p_data <- stomach@meta.data
+#stomach$orig.ident<-stomach$celltype
+#p_data$celltype <- stomach@active.ident#整合每个细胞的细胞鉴定信息到p_data里面。如果已经添加则不必重复添
+##提取基因信息如生物类型、gc含里等
+f_data <- data.frame(gene_short_name = row.names(stomach) ,row.names = row.names(stomach))
+##expr_matrix的行数与f_data的行数相同(gene number), expr_matrix的列数与p_data的行数相同(cell number)
+#构建CDS对象
+pd <- new( "AnnotatedDataFrame", data = p_data)
+fd <- new( "AnnotatedDataFrame", data = f_data)
+#将p_data和f_data从data.frame转换AnnotatedDataFrame对象。
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+
+#开始运行
+#3.估计size factor和离散度-----------------------------------------
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+
+#4.过滤低质量细胞,其实我们在前面已经过滤过细胞和基因了-----------------------------------------
+cds <- detectGenes(cds,min_expr = 0.1)#这一操作会在fData(cds)中添加一列num_cells_expressed
+print(head(fData(cds)))#此时有13714个基因
+expressed_genes <- row.names(subset(fData(cds),num_cells_expressed >= 10))#过滤掉在小于10个细胞中表达的基因,还剩11095个基因。
+
+#5.细胞分类,网站提供四种分类方法,我们使用细胞类型分类,但需要提前注释细胞-----------------------------------------
+#之前已经注释好细胞类型了
+#6.轨迹定义基因选择及可视化和构建轨迹-----------------------------------------
+#1、选择定义过程的基因
+#这三种都是无监督方法
+#降为聚类
+# ##使用seurat选择的高变基因
+# express_genes <- VariableFeatures(stomach)
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering genes(cds)
+# ##使用clusters差异表达基因
+# deg.cluster <- FindAllMarkers(stomach)
+# express_genes <- subset(deg.cluster,p_val_adj<0.05)$gene
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering_genes(cds)
+# ##使用monocle选择的高变基因
+# disp_table <- dispersionTable(cds)
+# disp.genes 〈- subset(disp_table,mean_expression >= 0.1 & dispersion_empirical >= 1 * dispersion_fit)$gene
+# cds <- setOrderingFilter(cds, disp.genes)
+# plot_ordering _genes(cds)
+cds$celltype
+
+#这一步输入的expressed_genes来自于步骤4。#后续分析使用的是该方法
+#也可输入seurat筛选出的高变基因:expressed_genes <- VariableFeatures(stomach)
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~seurat_clusters",cores=1)
+#~后面是表示对谁做差异分析的变里,理论上可以为p_data的任意列名
+head(diff)
+
+
+
+##差异表达基因作为轨迹构建的基因,差异基因的选择标准是qval<0.01,decreasing=F表示按数值增加排序
+deg <- subset(diff,qval < 0.01)#选出2829个基因
+deg <- deg[ order(deg$qval,decreasing=F),]
+head(deg)
+
+##差异基因的结果文件保存
+#write.table(deg,file="train.monocle.DE6.xls" ,col.names=T,row.names=F ,sep="/t" ,quote=F)
+
+##轨迹构建基因可视化
+ordergene <- rownames(deg)
+cds <- setOrderingFilter(cds, ordergene)
+
+#这一步是很重要的,在我们得到想要的基因列表后,
+#我们需要使用setOrderingFilter将它嵌入cds对象,后续的一系列操作都要依赖于这个list。
+#setOrderingFilter之后,这些基因被储存在cds@featureData@data[["use_for_ordering"]],
+#可以通过table(cds@featureData@data[["use_for_ordering"]])查看
+
+
+
+#pdf("train.ordergenes.pdf")
+plot_ordering_genes(cds)
+#dev.off()
+#出的图黑色的点表示用来构建轨迹的差异基因,灰色表示背景基因。
+#红色的线是根据第2步计算的基因表达大小和离散度分布的趋势(可以看到,找到的基因属于离散度比较高的基因)
+
+
+
+#选择排序的基因数目一般选择2000个比较合适,如果数量太多,也可以选择TOP基因
+ordergene <- row.names(deg)[order(deg$qval)][1:2000]#这样用的文献->肿瘤浸润髓系细胞的pan-cancer单细胞转录图谱
+
+#2、降维
+#使用反向图嵌入DDRTree算法降维
+cds <- reduceDimension(cds, max_components = 2,method = "DDRTree")
+
+
+#3、模拟时间轴轨迹构建和在模拟时间内排列细胞
+
+cds <- orderCells(cds)
+#⚠️使用root_state参数可以设置拟时间轴的根,如下面的拟时间着色图中可以看出,左边是根。
+#根据state图可以看出,根是State1,若要想把另一端设为根,可以按如下操作
+#cds <- orderCells(cds, root_state = 5) #把State5设成拟时间轴的起始点
+
+
+#可视化:根据cds@phenoData@data中的表型信息(metadata)对细胞上色
+
+#(1)以pseudotime值上色(Pseudotime是monocle2基于细胞基因表达信息计算的概率,表示时间的先后。)
+#pdf("train.monocle.pseudotime. pdf" ,width = 7,height - 7)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE)
+#dev.offO()
+
+#(2)以细胞类型上色
+#pdf("train.monocle.celltype.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by="celltype",size=1,show_backbone=TRUE)
+#dev.off()
+
+#(3)以细胞状态上色
+#pdf("train.monocle.state.pdf",width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "State",size=1,show_backbone=TRUE)
+#dev.off()
+
+#(4)按照seurat分群排序细胞
+#pdf( "seurat.clusters.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "seurat_clusters")
+#dev.off()
+
+#(5)以细胞状态上色（拆分）“分面”轨迹图,以便更容易地查看每个状态的位置。
+#pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "State") + facet_wrap("~State", nrow = 1)
+#dev.off()
+
+#(6)以相关性上色
+#pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "relevance",size=1,show_backbone=TRUE)
+#dev.off()
+
+
+saveRDS(cds,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\胃\\stomach_cds.rds")
+cds<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\胃\\stomach_cds.rds")
+
+
+
+#pancreas-monocle-----------------------------------------
+
+# library(DDRTree)
+# library(pheatmap)
+library(monocle)
+library(patchwork)#用来做拼图的包,后面的p1lp1|p3在一张图上展示三个图就是这个包的功劳
+#Load the pancrease dataset
+library(tidyverse)
+# library(devtools)
+# library(harmony)
+library(Seurat) 
+# library(remotes)
+# library(patchwork)
+# library(ggplot2)
+# library(cowplot)
+# library(dplyr)
+# library(grid)
+# library(gridExtra)
+# library(data.table)
+# library(Rcpp)
+# library(SingleR) 
+
+#2构建CellDataSet对象-----------------------------------------
+#数据无细胞注释信息,我们先给他注释细胞类型
+
+setwd("F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\CRA001160最终版\\")
+
+pancrease<-readRDS("Seurat_cancer.rds")
+
+table(pancrease[['celltype']])
+pancrease<-pancrease[,which(pancrease$celltype=="Malignant")]
+table(pancrease[['celltype']])
+
+
+
+
+Seudata<-readRDS("final_seurat.rds")
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+table(Seudata$come)
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+
+#发育不相关
+index1 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "7"|substr(ab[,1],1,2) == "9")
+f<-ab[-index1,]
+pancrease_f<-pancrease[,rownames(f)]
+pancrease_f$relevance<-"N"
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "7"|substr(ab[,1],1,2) == "9")
+a<-ab[index2,]
+pancrease_a<-pancrease[,rownames(a)]
+pancrease_a$relevance<-"Y"
+
+pancrease<-merge(x = pancrease_a, y = pancrease_f,merge.data = F)
+
+table(pancrease$relevance)
+
+
+
+
+pancrease[["percent.mt"]]<- PercentageFeatureSet(pancrease,pattern = "^MT-")
+##展示样本特性
+VlnPlot(pancrease, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+pancrease<- subset(pancrease, subset =  nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt<10)
+
+pancrease<- NormalizeData(pancrease, normalization.method = "LogNormalize", scale.factor = 10000) 
+pancrease<- FindVariableFeatures(pancrease, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(pancrease) 
+pancrease <- ScaleData(pancrease, features = all.genes) 
+pancrease <- ScaleData(pancrease,vars.to.regress = "percent.mt") 
+pancrease <- RunPCA(pancrease,features = VariableFeatures(object = pancrease))
+ElbowPlot(pancrease) 
+ndim=15#根据上图确定
+pancrease<- FindNeighbors(pancrease,dims = 1:ndim)
+pancrease <- FindClusters(pancrease,resolution = 0.5)
+pancrease <- RunUMAP(pancrease,dims = 1:ndim)
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\胰腺\\")
+#pancrease[['cell_type']]<- pancrease@active.ident #将注释结果添加到metadatalevels(pancrease)
+saveRDS(pancrease,file = "pancrease.rds ")
+
+#使用注释好的数据提取CDS对象需要的输入文件
+
+pancrease <- readRDS("pancrease.rds")#导入注释好的seurat对象（已注释)
+##提取表型信息--细胞信息(建议载入细胞的聚类或者细胞类型鉴定信息、实验条件等信息)
+expr_matrix <- as(as.matrix(pancrease@assays$RNA@counts), "sparseMatrix")
+##提取表型信息到p_data(phenotype_data)里面
+p_data <- pancrease@meta.data
+#pancrease$orig.ident<-pancrease$celltype
+#p_data$celltype <- pancrease@active.ident#整合每个细胞的细胞鉴定信息到p_data里面。如果已经添加则不必重复添
+##提取基因信息如生物类型、gc含里等
+f_data <- data.frame(gene_short_name = row.names(pancrease) ,row.names = row.names(pancrease))
+##expr_matrix的行数与f_data的行数相同(gene number), expr_matrix的列数与p_data的行数相同(cell number)
+#构建CDS对象
+pd <- new( "AnnotatedDataFrame", data = p_data)
+fd <- new( "AnnotatedDataFrame", data = f_data)
+#将p_data和f_data从data.frame转换AnnotatedDataFrame对象。
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+
+#开始运行
+#3.估计size factor和离散度-----------------------------------------
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+
+#4.过滤低质量细胞,其实我们在前面已经过滤过细胞和基因了-----------------------------------------
+cds <- detectGenes(cds,min_expr = 0.1)#这一操作会在fData(cds)中添加一列num_cells_expressed
+print(head(fData(cds)))#此时有13714个基因
+expressed_genes <- row.names(subset(fData(cds),num_cells_expressed >= 10))#过滤掉在小于10个细胞中表达的基因,还剩11095个基因。
+
+#5.细胞分类,网站提供四种分类方法,我们使用细胞类型分类,但需要提前注释细胞-----------------------------------------
+#之前已经注释好细胞类型了
+#6.轨迹定义基因选择及可视化和构建轨迹-----------------------------------------
+#1、选择定义过程的基因
+#这三种都是无监督方法
+#降为聚类
+# ##使用seurat选择的高变基因
+# express_genes <- VariableFeatures(pancrease)
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering genes(cds)
+# ##使用clusters差异表达基因
+# deg.cluster <- FindAllMarkers(pancrease)
+# express_genes <- subset(deg.cluster,p_val_adj<0.05)$gene
+# cds <- setorderingFilter(cds, express_genes)
+# plot_ordering_genes(cds)
+# ##使用monocle选择的高变基因
+# disp_table <- dispersionTable(cds)
+# disp.genes 〈- subset(disp_table,mean_expression >= 0.1 & dispersion_empirical >= 1 * dispersion_fit)$gene
+# cds <- setOrderingFilter(cds, disp.genes)
+# plot_ordering _genes(cds)
+cds$celltype
+
+#这一步输入的expressed_genes来自于步骤4。#后续分析使用的是该方法
+#也可输入seurat筛选出的高变基因:expressed_genes <- VariableFeatures(pancrease)
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~seurat_clusters",cores=1)
+#~后面是表示对谁做差异分析的变里,理论上可以为p_data的任意列名
+head(diff)
+
+
+
+##差异表达基因作为轨迹构建的基因,差异基因的选择标准是qval<0.01,decreasing=F表示按数值增加排序
+deg <- subset(diff,qval < 0.01)#选出2829个基因
+deg <- deg[ order(deg$qval,decreasing=F),]
+head(deg)
+
+##差异基因的结果文件保存
+write.table(deg,file="train.monocle.DE6.xls" ,col.names=T,row.names=F ,sep="/t" ,quote=F)
+
+##轨迹构建基因可视化
+ordergene <- rownames(deg)
+cds <- setOrderingFilter(cds, ordergene)
+
+#这一步是很重要的,在我们得到想要的基因列表后,
+#我们需要使用setOrderingFilter将它嵌入cds对象,后续的一系列操作都要依赖于这个list。
+#setOrderingFilter之后,这些基因被储存在cds@featureData@data[["use_for_ordering"]],
+#可以通过table(cds@featureData@data[["use_for_ordering"]])查看
+
+
+
+pdf("train.ordergenes.pdf")
+plot_ordering_genes(cds)
+dev.off()
+#出的图黑色的点表示用来构建轨迹的差异基因,灰色表示背景基因。
+#红色的线是根据第2步计算的基因表达大小和离散度分布的趋势(可以看到,找到的基因属于离散度比较高的基因)
+
+
+
+#选择排序的基因数目一般选择2000个比较合适,如果数量太多,也可以选择TOP基因
+ordergene <- row.names(deg)[order(deg$qval)][1:2000]#这样用的文献->肿瘤浸润髓系细胞的pan-cancer单细胞转录图谱
+
+#2、降维
+#使用反向图嵌入DDRTree算法降维
+cds <- reduceDimension(cds, max_components = 2,method = "DDRTree")
+
+
+#3、模拟时间轴轨迹构建和在模拟时间内排列细胞
+
+cds <- orderCells(cds)
+#⚠️使用root_state参数可以设置拟时间轴的根,如下面的拟时间着色图中可以看出,左边是根。
+#根据state图可以看出,根是State1,若要想把另一端设为根,可以按如下操作
+#cds <- orderCells(cds, root_state = 5) #把State5设成拟时间轴的起始点
+
+
+#可视化:根据cds@phenoData@data中的表型信息(metadata)对细胞上色
+
+#(1)以pseudotime值上色(Pseudotime是monocle2基于细胞基因表达信息计算的概率,表示时间的先后。)
+pdf("train.monocle.pseudotime. pdf" ,width = 7,height - 7)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE)
+dev.offO()
+
+#(2)以细胞类型上色
+pdf("train.monocle.celltype.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by="celltype",size=1,show_backbone=TRUE)
+dev.off()
+
+#(3)以细胞状态上色
+pdf("train.monocle.state.pdf",width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "State",size=1,show_backbone=TRUE)
+dev.off()
+
+#(4)按照seurat分群排序细胞
+pdf( "seurat.clusters.pdf" ,width = 7,height = 7)
+plot_cell_trajectory(cds,color_by = "seurat_clusters")
+dev.off()
+
+#(5)以细胞状态上色（拆分）“分面”轨迹图,以便更容易地查看每个状态的位置。
+pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "State") + facet_wrap("~State", nrow = 1)
+dev.off()
+
+#(6)以相关性上色
+pdf("train.monocle.state.faceted.pdf" ,width = 10, height = 7)
+plot_cell_trajectory(cds,color_by = "relevance",size=1,show_backbone=TRUE)
+dev.off()
+
+
+saveRDS(cds,"F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\胰腺\\cds.rds")
+cds<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\monocle2\\胰腺\\cds.rds")
+
+
+#功能富集------
+
+library(AnnotationDbi)
+library(org.Hs.eg.db)#基因注释包
+library(clusterProfiler)#富集包
+library(dplyr)
+library(ggplot2)#画图包
+
+
+
+#肺----------------
+up<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肺\\up_未标准化.txt",header=T)
+# 将gene symbol转换为Entrez ID,防止分析出错
+id_list <- mapIds(org.Hs.eg.db,rownames(up),"ENTREZID","SYMBOL")
+# 去除转换不成功的结果，即id=NA的情况
+id_list <- na.omit(id_list)
+gene<-id_list
+
+ego_BP <- enrichGO(gene = gene,
+                   OrgDb=org.Hs.eg.db,
+                   keyType = "ENTREZID",
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   minGSSize = 1,
+                   pvalueCutoff = 0.01,
+                   qvalueCutoff = 0.05,
+                   readable = TRUE)
+
+ego_result_BP <- as.data.frame(ego_BP)
+
+
+
+#5、但是有时候我们富集到的通路太多了，不方便绘制图片，可以选择部分绘制，这时候跳过第4步，来到第5步
+display_number = c(257, 22, 22)#这三个数字分别代表选取的BP、CC、MF的通路条数，这个自己设置就行了
+ego_result_BP <- as.data.frame(ego_BP)[1:display_number[1], ]
+ego_result_BP = ego_result_BP[order(ego_result_BP$Count,decreasing = T),]
+
+##将以上我们摘取的部分通路重新组合成数据框
+go_enrich_df <- data.frame(
+  ID=ego_result_BP$ID,Description=ego_result_BP$Description,pvalue=ego_result_BP$pvalue,adj=ego_result_BP$p.adjust,
+  GeneNumber=ego_result_BP$Count,
+  type=factor(rep("biological process", display_number[1]), 
+              levels=c("biological process")))
+
+
+
+write.csv(go_enrich_df,file = "C:\\Users\\Dell\\Desktop\\功能富集\\lung_go_up.csv",row.names = F)
+
+#选我们需要的通路
+lung_go<-go_enrich_df[c(16,19,25,32,33,42,45,57,86,94),]
+lung_up = lung_go[order(lung_go$GeneNumber,decreasing = T),]
+
+
+lung_up<-lung_up[c(1:10),]
+
+
+a<-lung_up$pvalue
+a<--log(a)
+lung_up$pvalue<-a
+
+
+#颜色  #B9DDF1  #2A5783
+#肝------------------
+up<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肝\\up_未标准化.txt",header=T)
+# 将gene symbol转换为Entrez ID,防止分析出错
+id_list <- mapIds(org.Hs.eg.db,rownames(up),"ENTREZID","SYMBOL")
+# 去除转换不成功的结果，即id=NA的情况
+id_list <- na.omit(id_list)
+gene<-id_list
+
+ego_BP <- enrichGO(gene = gene,
+                   OrgDb=org.Hs.eg.db,
+                   keyType = "ENTREZID",
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   minGSSize = 1,
+                   pvalueCutoff = 0.01,
+                   qvalueCutoff = 0.05,
+                   readable = TRUE)
+
+ego_result_BP <- as.data.frame(ego_BP)
+
+
+
+#5、但是有时候我们富集到的通路太多了，不方便绘制图片，可以选择部分绘制，这时候跳过第4步，来到第5步
+display_number = c(60, 22, 22)#这三个数字分别代表选取的BP、CC、MF的通路条数，这个自己设置就行了
+ego_result_BP <- as.data.frame(ego_BP)[1:display_number[1], ]
+ego_result_BP = ego_result_BP[order(ego_result_BP$Count,decreasing = T),]
+
+##将以上我们摘取的部分通路重新组合成数据框
+go_enrich_df <- data.frame(
+  ID=ego_result_BP$ID,Description=ego_result_BP$Description,pvalue=ego_result_BP$pvalue,adj=ego_result_BP$p.adjust,
+  GeneNumber=ego_result_BP$Count,
+  type=factor(rep("biological process", display_number[1]), 
+              levels=c("biological process")))
+
+
+
+write.csv(go_enrich_df,file = "C:\\Users\\Dell\\Desktop\\功能富集\\liver_go_up.csv",row.names = F)
+
+#选我们需要的通路
+liver_go<-go_enrich_df[c(1:9,11),]
+liver_up = liver_go[order(liver_go$GeneNumber,decreasing = T),]
+
+
+
+a<-liver_up$pvalue
+a<--log(a)
+liver_up$pvalue<-a
+
+
+#颜色   #B3E0A6   #24693D
+
+#脑------------------------
+
+up<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\脑\\up_未标准化.txt",header=T)
+# 将gene symbol转换为Entrez ID,防止分析出错
+id_list <- mapIds(org.Hs.eg.db,rownames(up),"ENTREZID","SYMBOL")
+# 去除转换不成功的结果，即id=NA的情况
+id_list <- na.omit(id_list)
+gene<-id_list
+
+ego_BP <- enrichGO(gene = gene,
+                   OrgDb=org.Hs.eg.db,
+                   keyType = "ENTREZID",
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   minGSSize = 1,
+                   pvalueCutoff = 0.01,
+                   qvalueCutoff = 0.05,
+                   readable = TRUE)
+
+ego_result_BP <- as.data.frame(ego_BP)
+
+
+
+#5、但是有时候我们富集到的通路太多了，不方便绘制图片，可以选择部分绘制，这时候跳过第4步，来到第5步
+display_number = c(171, 22, 22)#这三个数字分别代表选取的BP、CC、MF的通路条数，这个自己设置就行了
+ego_result_BP <- as.data.frame(ego_BP)[1:display_number[1], ]
+ego_result_BP = ego_result_BP[order(ego_result_BP$Count,decreasing = T),]
+
+##将以上我们摘取的部分通路重新组合成数据框
+go_enrich_df <- data.frame(
+  ID=ego_result_BP$ID,Description=ego_result_BP$Description,pvalue=ego_result_BP$pvalue,adj=ego_result_BP$p.adjust,
+  GeneNumber=ego_result_BP$Count,
+  type=factor(rep("biological process", display_number[1]), 
+              levels=c("biological process")))
+
+
+
+write.csv(go_enrich_df,file = "C:\\Users\\Dell\\Desktop\\功能富集\\brain_go_up.csv",row.names = F)
+
+#选我们需要的通路
+brain_go<-go_enrich_df[c(1,2,13,15,17,25,28,37,39,41),] 
+brain_up = brain_go[order(brain_go$GeneNumber,decreasing = T),]
+
+
+
+a<-brain_up$pvalue
+a<--log(a)
+brain_up$pvalue<-a
+
+
+#颜色   #7C4D79   #EEC9E5
+
+#肾-------------------
+
+up<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\肾\\up_未标准化.txt",header=T)
+# 将gene symbol转换为Entrez ID,防止分析出错
+id_list <- mapIds(org.Hs.eg.db,rownames(up),"ENTREZID","SYMBOL")
+# 去除转换不成功的结果，即id=NA的情况
+id_list <- na.omit(id_list)
+gene<-id_list
+
+ego_BP <- enrichGO(gene = gene,
+                   OrgDb=org.Hs.eg.db,
+                   keyType = "ENTREZID",
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   minGSSize = 1,
+                   pvalueCutoff = 0.01,
+                   qvalueCutoff = 0.05,
+                   readable = TRUE)
+
+ego_result_BP <- as.data.frame(ego_BP)
+
+
+
+#5、但是有时候我们富集到的通路太多了，不方便绘制图片，可以选择部分绘制，这时候跳过第4步，来到第5步
+display_number = c(565, 22, 22)#这三个数字分别代表选取的BP、CC、MF的通路条数，这个自己设置就行了
+ego_result_BP <- as.data.frame(ego_BP)[1:display_number[1], ]
+ego_result_BP = ego_result_BP[order(ego_result_BP$Count,decreasing = T),]
+
+##将以上我们摘取的部分通路重新组合成数据框
+go_enrich_df <- data.frame(
+  ID=ego_result_BP$ID,Description=ego_result_BP$Description,pvalue=ego_result_BP$pvalue,adj=ego_result_BP$p.adjust,
+  GeneNumber=ego_result_BP$Count,
+  type=factor(rep("biological process", display_number[1]), 
+              levels=c("biological process")))
+
+
+
+write.csv(go_enrich_df,file = "C:\\Users\\Dell\\Desktop\\功能富集\\kidney_go_up.csv",row.names = F)
+
+#选我们需要的通路
+kidney_go<-go_enrich_df[c(4,64,69,107,114,119,129,173,219,258),]
+kidney_up = kidney_go[order(kidney_go$GeneNumber,decreasing = T),]
+
+
+
+a<-kidney_up$pvalue
+a<--log(a)
+kidney_up$pvalue<-a
+
+
+#颜色   #9E3D22   #FFC685
+
+#胃----------------
+up<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\胃\\up_未标准化.txt",header=T)
+# 将gene symbol转换为Entrez ID,防止分析出错
+id_list <- mapIds(org.Hs.eg.db,rownames(up),"ENTREZID","SYMBOL")
+# 去除转换不成功的结果，即id=NA的情况
+id_list <- na.omit(id_list)
+gene<-id_list
+
+ego_BP <- enrichGO(gene = gene,
+                   OrgDb=org.Hs.eg.db,
+                   keyType = "ENTREZID",
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   minGSSize = 1,
+                   pvalueCutoff = 0.01,
+                   qvalueCutoff = 0.05,
+                   readable = TRUE)
+
+ego_result_BP <- as.data.frame(ego_BP)
+
+
+
+#5、但是有时候我们富集到的通路太多了，不方便绘制图片，可以选择部分绘制，这时候跳过第4步，来到第5步
+display_number = c(54, 22, 22)#这三个数字分别代表选取的BP、CC、MF的通路条数，这个自己设置就行了
+ego_result_BP <- as.data.frame(ego_BP)[1:display_number[1], ]
+ego_result_BP = ego_result_BP[order(ego_result_BP$Count,decreasing = T),]
+
+##将以上我们摘取的部分通路重新组合成数据框
+go_enrich_df <- data.frame(
+  ID=ego_result_BP$ID,Description=ego_result_BP$Description,pvalue=ego_result_BP$pvalue,adj=ego_result_BP$p.adjust,
+  GeneNumber=ego_result_BP$Count,
+  type=factor(rep("biological process", display_number[1]), 
+              levels=c("biological process")))
+
+
+
+write.csv(go_enrich_df,file = "C:\\Users\\Dell\\Desktop\\功能富集\\stomach_go_up.csv",row.names = F)
+
+#选我们需要的通路
+stomach_go<-go_enrich_df[c(1,6,9,10,11,13,33,41,47,49),]
+stomach_up = stomach_go[order(stomach_go$GeneNumber,decreasing = T),]
+
+
+
+a<-stomach_up$pvalue
+a<--log(a)
+stomach_up$pvalue<-a
+
+
+#颜色   #3C8200   #DBE8B4
+
+#胰腺-----------------
+up<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\胰腺\\up_未标准化.txt",header=T)
+# 将gene symbol转换为Entrez ID,防止分析出错
+id_list <- mapIds(org.Hs.eg.db,rownames(up),"ENTREZID","SYMBOL")
+# 去除转换不成功的结果，即id=NA的情况
+id_list <- na.omit(id_list)
+gene<-id_list
+
+ego_BP <- enrichGO(gene = gene,
+                   OrgDb=org.Hs.eg.db,
+                   keyType = "ENTREZID",
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   minGSSize = 1,
+                   pvalueCutoff = 0.01,
+                   qvalueCutoff = 0.05,
+                   readable = TRUE)
+
+ego_result_BP <- as.data.frame(ego_BP)
+
+
+
+#5、但是有时候我们富集到的通路太多了，不方便绘制图片，可以选择部分绘制，这时候跳过第4步，来到第5步
+display_number = c(184, 22, 22)#这三个数字分别代表选取的BP、CC、MF的通路条数，这个自己设置就行了
+ego_result_BP <- as.data.frame(ego_BP)[1:display_number[1], ]
+ego_result_BP = ego_result_BP[order(ego_result_BP$Count,decreasing = T),]
+
+##将以上我们摘取的部分通路重新组合成数据框
+go_enrich_df <- data.frame(
+  ID=ego_result_BP$ID,Description=ego_result_BP$Description,pvalue=ego_result_BP$pvalue,adj=ego_result_BP$p.adjust,
+  GeneNumber=ego_result_BP$Count,
+  type=factor(rep("biological process", display_number[1]), 
+              levels=c("biological process")))
+
+
+
+write.csv(go_enrich_df,file = "C:\\Users\\Dell\\Desktop\\功能富集\\pancrease_go_up.csv",row.names = F)
+
+#选我们需要的通路
+pancrease_go<-go_enrich_df[c(1,6,7,13,16,17,22,23,30,31),]
+pancrease_up = pancrease_go[order(pancrease_go$GeneNumber,decreasing = T),]
+
+
+
+a<-pancrease_up$pvalue
+a<--log(a)
+pancrease_up$pvalue<-a
+
+
+#颜色   #7F000D   #D7B0B1
+
+
+#分组柱状图绘制#----------------------
+ego_result_BP<-kidney_up
+ego_result_BP<-ego_result_BP[order(ego_result_BP$pvalue,decreasing = T),]#按照-log(pvalue)值排序
+#-log(pvalue)为x轴
+ggplot(ego_result_BP,aes(x = pvalue,y = Description,fill=GeneNumber))  +  #fill=PValue，根据PValue填充颜色；color=PValue根据PValue改变线的颜色
+  
+  geom_bar(stat="identity",width=0.8 ) + ylim(rev(ego_result_BP$Description)) + #柱状图宽度与y轴显示顺序
+  
+  theme_test() + #调整背景色
+  
+  scale_fill_gradient(low="#FFC685",high ="#9E3D22") +  #调节填充的颜色
+  
+  labs(size="Genecounts",x="-log(pvalue)",y="GO term",title="GO_BP") + #设置图内标签（x、y轴、标题）
+  
+  theme(axis.text=element_text(size=10,color="black"),
+        
+  axis.title = element_text(size=16),title = element_text(size=13))
+#-log(pvalue)
+#GeneNumber
+#GeneNumber为x轴
+
+
+ego_result_BP<-ego_result_BP[order(ego_result_BP$GeneNumber,decreasing = T),]#按照GeneNumber值排序
+ggplot(ego_result_BP,aes(x = GeneNumber,y = Description,fill=-log(pvalue)))  +  #fill=PValue，根据PValue填充颜色；color=PValue根据PValue改变线的颜色
+  
+  geom_bar(stat="identity",width=0.8 ) + ylim(rev(ego_result_BP$Description)) + #柱状图宽度与y轴显示顺序
+  
+  theme_test() + #调整背景色
+  
+  scale_fill_gradient(low="#9E3D22",high ="#FFC685") +  #调节填充的颜色
+  
+  labs(size="Genecounts",x="GeneNumber",y="GO term",title="GO_BP") + #设置图内标签（x、y轴、标题）
+  
+  theme(axis.text=element_text(size=10,color="black"),
+        
+        axis.title = element_text(size=16),title = element_text(size=13))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

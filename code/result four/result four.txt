@@ -1,0 +1,2117 @@
+#############################nichenetr-lung-----------------------------------
+
+library(tidyverse)
+library(devtools)
+library(harmony)
+library(Seurat) 
+#对数据进行seurat标准流程
+setwd("F:\\暑假作业\\2022年暑假工作\\肺\\GSE127465（TISCH注释）\\")
+seurat<-readRDS("Seurat_cancer.rds")
+
+table(seurat$celltype)
+
+of_seurat<-readRDS("cancer_a后.rds")
+
+table(of_seurat$celltype)
+colnames(of_seurat)
+#将细胞按照癌胚样和旁观者来分组
+by_seurat<-seurat[,-which(colnames(seurat)%in%colnames(of_seurat))]
+table(by_seurat$celltype)
+
+of_seurat$aggregate<-"OF"
+by_seurat$aggregate<-"NOR"
+
+Seurat_cancer<-merge(x=of_seurat,y=by_seurat)
+table(Seurat_cancer$celltype)
+
+Seurat_cancer %>% Idents() %>% table()
+#查看信息
+Seurat_cancer@meta.data %>% head()
+Seurat_cancer
+
+Seurat_cancer[["percent.mt"]] <- PercentageFeatureSet(Seurat_cancer, pattern = "^MT-")
+VlnPlot(Seurat_cancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat_cancer<- subset(Seurat_cancer, subset =  nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt<20)
+
+Seurat_cancer<- NormalizeData(Seurat_cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+Seurat_cancer<- FindVariableFeatures(Seurat_cancer, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(Seurat_cancer) 
+Seurat_cancer <- ScaleData(Seurat_cancer, features = all.genes) 
+Seurat_cancer <- ScaleData(Seurat_cancer,vars.to.regress = "percent.mt") 
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+Seurat_cancer <- RunPCA(Seurat_cancer, features = Seurat_cancer@assays$RNA@var.features,npcs = 50)
+ElbowPlot(Seurat_cancer) 
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+ndim=30#根据上图确定
+Seurat_cancer<- FindNeighbors(Seurat_cancer, dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+Seurat_cancer <- RunUMAP(Seurat_cancer, reduction = "pca", dims = 1:ndim)
+p1<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "orig.ident",cols = c("#F9D23C", "#ED97CA"))
+p1#("#F64971", "#F7B6D2")
+p11<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "aggregate") 
+p11
+p2<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "seurat_clusters") 
+p2#("#F64971", "#F7B6D2")
+p3<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "celltype")
+p3#("#F64971", "#F7B6D2")
+table(Seurat_cancer$celltype)
+
+Idents(Seurat_cancer) = Seurat_cancer$celltype
+#准备NicheNet-----------------
+# devtools::install_github("saeyslab/nichenetr")
+library(circlize)
+library(nichenetr)
+library(Seurat) # please update to Seurat V4
+library(tidyverse)
+#1.读入NicheNet的配体-受体先验模型，配体-受体网络和加权整合网络------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\细胞通讯\\")
+ligand_target_matrix = readRDS("ligand_target_matrix.rds")
+ligand_target_matrix[1:5,1:5] #target genes in rows, ligands in columns
+
+lr_network = readRDS("lr_network.rds")
+head(lr_network)
+
+
+weighted_networks = readRDS("weighted_networks.rds")
+head(weighted_networks$lr_sig) # interactions and their weights in the ligand-receptor + signaling network
+
+head(weighted_networks$gr) # interactions and their weights in the gene regulatory network
+
+#2.2 读入注释好的Seurat对象
+#seuratObj = readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\徐盟佳-细胞互作数据\\细胞互作数据\\Data\\肺\\肺发育相关(癌症+免疫细胞).rds")
+#seuratObj = readRDS("seuratObj.rds")
+
+seuratObj <- Seurat_cancer
+
+seuratObj@meta.data %>% head()
+
+seuratObj
+
+
+#设置分组类型，可为celltype
+
+#Idents(seuratObj) <- “group”
+#2.指定Sender细胞和Receiver细胞,确定Background基因--------------------
+
+## receiver
+receiver= c("Malignant")
+expressed_genes_receiver = get_expressed_genes(receiver, seuratObj, pct = 0.10)
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+
+#以下适用于多个细胞亚群者
+# list_expressed_genes_receiver = receiver_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every receiver cell type separately here
+# expressed_genes_receiver = list_expressed_genes_receiver %>% unlist() %>% unique()
+
+
+##sender
+sender_celltypes = c("CD4Tn","CD8Tex", "cDC2","Endothelial","Fibroblasts","M2","Mast","Monocyte","Neutrophils","NK","Plasma")
+list_expressed_genes_sender = sender_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every sender cell type separately here
+expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+
+
+#3.找到感兴趣的基因集，如Receiver细胞中差异表达的基因-------------------
+seurat_obj_receiver= subset(seuratObj, idents = receiver)
+seurat_obj_receiver = SetIdent(seurat_obj_receiver, value = seurat_obj_receiver[["aggregate"]])
+
+condition_oi = "OF"
+condition_reference = "NOR" 
+
+table(seurat_obj_receiver$aggregate)
+
+
+DE_table_receiver = FindMarkers(object = seurat_obj_receiver, ident.1 = condition_oi, ident.2 = condition_reference, min.pct = 0.10) %>% rownames_to_column("gene")
+
+geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+
+#5.选择ligand--------------
+ligands = lr_network %>% pull(from) %>% unique()
+receptors = lr_network %>% pull(to) %>% unique()
+
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+
+
+#6.配体活性分析-------------
+#NicheNet根据它们的pearson相关系数对配体进行排名。
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+
+ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+
+#选择前20个
+best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+
+#这些配体由一个或多个输入发送器细胞表达。要查看哪个细胞群体表达这些顶级配体中的哪一个，您可以运行以下操作：
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), cols = "RdYlBu") + RotatedAxis()
+
+#观察这些配体癌胚细胞中是否有有差异表达
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), split.by = "aggregate") + RotatedAxis()
+#ggsave("top20_ligands_compare.png", p, width = 12, height = 8)
+
+#用小提琴图对比配体的表达情况
+VlnPlot(seuratObj, features = best_upstream_ligands, split.by = "aggregate", pt.size = 0, combine = T)
+#ggsave("VlnPlot_ligands_compare.png", p, width = 24, height = 16)
+#feature后面没有加%>% rev()，出图的基因顺序就和前两个图相反
+
+
+#7. 受配体配对分析---------------------------------
+#推断配体活性分析中排名靠前的配体的受体和最预测的靶基因
+
+
+#（1）Active target gene inference
+active_ligand_target_links_df = best_upstream_ligands %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.33)
+
+order_ligands = intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + 
+  theme(axis.text.x = element_text(face = "italic")) + 
+  # scale_fill_gradient2(low = "whitesmoke",  high = "royalblue", breaks = c(0,0.0045,0.0090))+
+  xlab("OF response genes in maligant cells") + ylab("Prioritized NOR cell ligands")
+p_ligand_target_network
+
+
+
+#（2）Receptors of top-ranked ligands
+
+lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+
+lr_network_top_df_large = weighted_networks$lr_sig %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+
+lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+
+dist_receptors = dist(lr_network_top_matrix, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix))
+
+vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+p_ligand_receptor_network
+
+#（3）Receptors of top-ranked ligands, 
+#but after considering only bona fide ligand-receptor interactions documented in 
+#literature and publicly available databases
+# 顶级配体的受体，但仅考虑文献和公开数据库中记录的真正配体-受体相互作用
+
+# 它说的bona fide interaction是说有文献报道的受配体，我不太赞同
+# 在被去掉的很多受配体对也有文献报道
+# 这一步我认为意义不太大
+lr_network_strict = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+ligands_bona_fide = lr_network_strict %>% pull(from) %>% unique()
+receptors_bona_fide = lr_network_strict %>% pull(to) %>% unique()
+
+lr_network_top_df_large_strict = lr_network_top_df_large %>% distinct(from,to) %>% inner_join(lr_network_strict, by = c("from","to")) %>% distinct(from,to)
+lr_network_top_df_large_strict = lr_network_top_df_large_strict %>% inner_join(lr_network_top_df_large, by = c("from","to"))
+
+lr_network_top_df_strict = lr_network_top_df_large_strict %>% spread("from","weight",fill = 0)
+lr_network_top_matrix_strict = lr_network_top_df_strict %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df_strict$to)
+
+dist_receptors = dist(lr_network_top_matrix_strict, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix_strict %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix_strict))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix_strict))
+
+vis_ligand_receptor_network_strict = lr_network_top_matrix_strict[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network_strict) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network_strict) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network_strict = vis_ligand_receptor_network_strict %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential\n(bona fide)")
+p_ligand_receptor_network_strict
+
+#9.Summary visualizations of the NicheNet analysis
+#做一个整合的图
+# ligand activity heatmap
+ligand_pearson_matrix = ligand_activities %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities$test_ligand)
+
+rownames(ligand_pearson_matrix) = rownames(ligand_pearson_matrix) %>% make.names()
+colnames(ligand_pearson_matrix) = colnames(ligand_pearson_matrix) %>% make.names()
+
+vis_ligand_pearson = ligand_pearson_matrix[order_ligands, ] %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Pearson")
+p_ligand_pearson = vis_ligand_pearson %>% make_heatmap_ggplot("Prioritized ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)") + theme(legend.text = element_text(size = 9))
+
+# ligand expression Seurat dotplot
+order_ligands_adapted = order_ligands
+order_ligands_adapted[order_ligands_adapted == "H2.M3"] = "H2-M3" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+order_ligands_adapted[order_ligands_adapted == "H2.T23"] = "H2-T23" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+rotated_dotplot = DotPlot(seuratObj %>% subset(celltype %in% sender_celltypes), features = order_ligands_adapted, cols = "RdYlBu") + coord_flip() + theme(legend.text = element_text(size = 10), legend.title = element_text(size = 12)) # flip of coordinates necessary because we want to show ligands in the rows when combining all plots
+
+figures_without_legend = cowplot::plot_grid(
+  p_ligand_pearson + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()),
+  rotated_dotplot + theme(legend.position = "none", axis.ticks = element_blank(), axis.title.x = element_text(size = 12), axis.text.y = element_text(face = "italic", size = 9), axis.text.x = element_text(size = 9,  angle = 90,hjust = 0)) + ylab("Expression in Sender") + xlab("") + scale_y_discrete(position = "right"),
+  p_ligand_lfc + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()) + ylab(""),
+  p_ligand_target_network + theme(legend.position = "none", axis.ticks = element_blank()) + ylab(""),
+  align = "hv",
+  nrow = 1,
+  rel_widths = c(ncol(vis_ligand_pearson)+6, ncol(vis_ligand_lfc) + 7, ncol(vis_ligand_lfc) + 8, ncol(vis_ligand_target)))
+
+legends = cowplot::plot_grid(
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_pearson)),
+  ggpubr::as_ggplot(ggpubr::get_legend(rotated_dotplot)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_lfc)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target_network)),
+  nrow = 1,
+  align = "h", rel_widths = c(1.5, 1, 1, 1))
+
+combined_plot = cowplot::plot_grid(figures_without_legend, legends, rel_heights = c(10,5), nrow = 2, align = "hv")
+combined_plot
+
+
+#############################nichenetr-liver----------------------------------
+
+library(tidyverse)
+library(devtools)
+library(harmony)
+library(Seurat) 
+# 看相关与不相关差别 ---------------------------------------------------------
+
+setwd("F:\\暑假作业\\2022年暑假工作\\肝\\GEO的肝癌症数据(GSE125449)\\去批次（cytoTRANCE）\\")
+Seurat_cancer<-readRDS("Seurat_cancer.rds")
+
+table(Seurat_cancer$celltype)
+
+Seudata<-readRDS("final_seurat.rds")
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+table(Seudata$come)
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "3"|substr(ab[,1],1,2) == "5"|substr(ab[,1],1,2) == "9")
+a<-ab[index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+of_seurat<-cancer_a
+table(of_seurat$celltype)
+seurat<-readRDS("cancer_seurat(未删细胞).rds")
+table(seurat$celltype)
+
+by_seurat<-seurat[,-which(colnames(seurat)%in%colnames(of_seurat))]
+
+table(by_seurat$celltype)
+
+
+of_seurat$aggregate<-"OF"
+by_seurat$aggregate<-"NOR"
+
+table(of_seurat$celltype)
+table(by_seurat$celltype)
+
+Seurat_cancer<-merge(x=of_seurat,y=by_seurat)
+table(Seurat_cancer$celltype)
+
+Seurat_cancer %>% Idents() %>% table()
+
+#查看信息
+Seurat_cancer@meta.data %>% head()
+Seurat_cancer
+
+Seurat_cancer[["percent.mt"]] <- PercentageFeatureSet(Seurat_cancer, pattern = "^MT-")
+VlnPlot(Seurat_cancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat_cancer<- subset(Seurat_cancer, subset =  nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt<20)
+
+Seurat_cancer<- NormalizeData(Seurat_cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+Seurat_cancer<- FindVariableFeatures(Seurat_cancer, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(Seurat_cancer) 
+Seurat_cancer <- ScaleData(Seurat_cancer, features = all.genes) 
+Seurat_cancer <- ScaleData(Seurat_cancer,vars.to.regress = "percent.mt") 
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+Seurat_cancer <- RunPCA(Seurat_cancer, features = Seurat_cancer@assays$RNA@var.features,npcs = 50)
+ElbowPlot(Seurat_cancer) 
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+ndim=30#根据上图确定
+Seurat_cancer<- FindNeighbors(Seurat_cancer, dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+Seurat_cancer <- RunUMAP(Seurat_cancer, reduction = "pca", dims = 1:ndim)
+p1<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "orig.ident",cols = c("#F9D23C", "#ED97CA"))
+p1#("#F64971", "#F7B6D2")
+p11<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "aggregate") 
+p11
+p2<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "seurat_clusters") 
+p2#("#F64971", "#F7B6D2")
+p3<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "celltype")
+p3#("#F64971", "#F7B6D2")
+table(Seurat_cancer$celltype)
+
+Idents(Seurat_cancer) = Seurat_cancer$celltype
+#准备NicheNet-----------------
+# devtools::install_github("saeyslab/nichenetr")
+library(circlize)
+library(nichenetr)
+library(Seurat) # please update to Seurat V4
+library(tidyverse)
+#1.读入NicheNet的配体-受体先验模型，配体-受体网络和加权整合网络------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\nichenetr\\")
+ligand_target_matrix = readRDS("ligand_target_matrix.rds")
+ligand_target_matrix[1:5,1:5] #target genes in rows, ligands in columns
+
+lr_network = readRDS("lr_network.rds")
+head(lr_network)
+
+
+weighted_networks = readRDS("weighted_networks.rds")
+head(weighted_networks$lr_sig) # interactions and their weights in the ligand-receptor + signaling network
+
+head(weighted_networks$gr) # interactions and their weights in the gene regulatory network
+
+#2.2 读入注释好的Seurat对象
+#seuratObj = readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\徐盟佳-细胞互作数据\\细胞互作数据\\Data\\肺\\肺发育相关(癌症+免疫细胞).rds")
+#seuratObj = readRDS("seuratObj.rds")
+
+seuratObj <- Seurat_cancer
+
+seuratObj@meta.data %>% head()
+
+seuratObj
+
+
+#设置分组类型，可为celltype
+
+#Idents(seuratObj) <- “group”
+#2.指定Sender细胞和Receiver细胞,确定Background基因--------------------
+table(seuratObj$celltype)
+table(seuratObj$aggregate)
+## receiver
+receiver= c("Malignant cell")
+expressed_genes_receiver = get_expressed_genes(receiver, seuratObj, pct = 0.10)
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+
+#以下适用于多个细胞亚群者
+# list_expressed_genes_receiver = receiver_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every receiver cell type separately here
+# expressed_genes_receiver = list_expressed_genes_receiver %>% unlist() %>% unique()
+
+
+##sender
+sender_celltypes = c("B cell","CAF", "HPC-like","T cell","TAM","TEC","unclassified")
+list_expressed_genes_sender = sender_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every sender cell type separately here
+expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+
+
+#3.找到感兴趣的基因集，如Receiver细胞中差异表达的基因-------------------
+seurat_obj_receiver= subset(seuratObj, idents = receiver)
+seurat_obj_receiver = SetIdent(seurat_obj_receiver, value = seurat_obj_receiver[["aggregate"]])
+
+condition_oi = "OF"
+condition_reference = "NOR" 
+
+table(seurat_obj_receiver$aggregate)
+
+
+DE_table_receiver = FindMarkers(object = seurat_obj_receiver, ident.1 = condition_oi, ident.2 = condition_reference, min.pct = 0.10) %>% rownames_to_column("gene")
+
+geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+
+#5.选择ligand--------------
+ligands = lr_network %>% pull(from) %>% unique()
+receptors = lr_network %>% pull(to) %>% unique()
+
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+
+
+#6.配体活性分析-------------
+#NicheNet根据它们的pearson相关系数对配体进行排名。
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+
+ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+
+#选择前20个
+best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+
+#这些配体由一个或多个输入发送器细胞表达。要查看哪个细胞群体表达这些顶级配体中的哪一个，您可以运行以下操作：
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), cols = "RdYlBu") + RotatedAxis()
+
+#观察这些配体癌胚细胞中是否有有差异表达
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), split.by = "aggregate") + RotatedAxis()
+#ggsave("top20_ligands_compare.png", p, width = 12, height = 8)
+
+#用小提琴图对比配体的表达情况
+#VlnPlot(seuratObj, features = best_upstream_ligands, split.by = "aggregate", pt.size = 0, combine = T)
+#ggsave("VlnPlot_ligands_compare.png", p, width = 24, height = 16)
+#feature后面没有加%>% rev()，出图的基因顺序就和前两个图相反
+
+
+#7. 受配体配对分析---------------------------------
+#推断配体活性分析中排名靠前的配体的受体和最预测的靶基因
+
+
+#（1）Active target gene inference
+active_ligand_target_links_df = best_upstream_ligands %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.33)
+
+order_ligands = intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + 
+  theme(axis.text.x = element_text(face = "italic")) + 
+  # scale_fill_gradient2(low = "whitesmoke",  high = "royalblue", breaks = c(0,0.0045,0.0090))+
+  xlab("OF response genes in maligant cells") + ylab("Prioritized NOR cell ligands")
+p_ligand_target_network
+
+
+
+#（2）Receptors of top-ranked ligands
+
+lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+
+lr_network_top_df_large = weighted_networks$lr_sig %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+
+lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+
+dist_receptors = dist(lr_network_top_matrix, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix))
+
+vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+p_ligand_receptor_network
+
+#（3）Receptors of top-ranked ligands, 
+#but after considering only bona fide ligand-receptor interactions documented in 
+#literature and publicly available databases
+# 顶级配体的受体，但仅考虑文献和公开数据库中记录的真正配体-受体相互作用
+
+# 它说的bona fide interaction是说有文献报道的受配体，我不太赞同
+# 在被去掉的很多受配体对也有文献报道
+# 这一步我认为意义不太大
+lr_network_strict = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+ligands_bona_fide = lr_network_strict %>% pull(from) %>% unique()
+receptors_bona_fide = lr_network_strict %>% pull(to) %>% unique()
+
+lr_network_top_df_large_strict = lr_network_top_df_large %>% distinct(from,to) %>% inner_join(lr_network_strict, by = c("from","to")) %>% distinct(from,to)
+lr_network_top_df_large_strict = lr_network_top_df_large_strict %>% inner_join(lr_network_top_df_large, by = c("from","to"))
+
+lr_network_top_df_strict = lr_network_top_df_large_strict %>% spread("from","weight",fill = 0)
+lr_network_top_matrix_strict = lr_network_top_df_strict %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df_strict$to)
+
+dist_receptors = dist(lr_network_top_matrix_strict, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix_strict %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix_strict))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix_strict))
+
+vis_ligand_receptor_network_strict = lr_network_top_matrix_strict[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network_strict) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network_strict) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network_strict = vis_ligand_receptor_network_strict %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential\n(bona fide)")
+p_ligand_receptor_network_strict
+
+#9.Summary visualizations of the NicheNet analysis
+#做一个整合的图
+# ligand activity heatmap
+ligand_pearson_matrix = ligand_activities %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities$test_ligand)
+
+rownames(ligand_pearson_matrix) = rownames(ligand_pearson_matrix) %>% make.names()
+colnames(ligand_pearson_matrix) = colnames(ligand_pearson_matrix) %>% make.names()
+
+vis_ligand_pearson = ligand_pearson_matrix[order_ligands, ] %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Pearson")
+p_ligand_pearson = vis_ligand_pearson %>% make_heatmap_ggplot("Prioritized ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)") + theme(legend.text = element_text(size = 9))
+
+# ligand expression Seurat dotplot
+order_ligands_adapted = order_ligands
+order_ligands_adapted[order_ligands_adapted == "H2.M3"] = "H2-M3" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+order_ligands_adapted[order_ligands_adapted == "H2.T23"] = "H2-T23" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+rotated_dotplot = DotPlot(seuratObj %>% subset(celltype %in% sender_celltypes), features = order_ligands_adapted, cols = "RdYlBu") + coord_flip() + theme(legend.text = element_text(size = 10), legend.title = element_text(size = 12)) # flip of coordinates necessary because we want to show ligands in the rows when combining all plots
+
+figures_without_legend = cowplot::plot_grid(
+  p_ligand_pearson + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()),
+  rotated_dotplot + theme(legend.position = "none", axis.ticks = element_blank(), axis.title.x = element_text(size = 12), axis.text.y = element_text(face = "italic", size = 9), axis.text.x = element_text(size = 9,  angle = 90,hjust = 0)) + ylab("Expression in Sender") + xlab("") + scale_y_discrete(position = "right"),
+  p_ligand_lfc + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()) + ylab(""),
+  p_ligand_target_network + theme(legend.position = "none", axis.ticks = element_blank()) + ylab(""),
+  align = "hv",
+  nrow = 1,
+  rel_widths = c(ncol(vis_ligand_pearson)+6, ncol(vis_ligand_lfc) + 7, ncol(vis_ligand_lfc) + 8, ncol(vis_ligand_target)))
+
+legends = cowplot::plot_grid(
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_pearson)),
+  ggpubr::as_ggplot(ggpubr::get_legend(rotated_dotplot)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_lfc)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target_network)),
+  nrow = 1,
+  align = "h", rel_widths = c(1.5, 1, 1, 1))
+
+combined_plot = cowplot::plot_grid(figures_without_legend, legends, rel_heights = c(10,5), nrow = 2, align = "hv")
+combined_plot
+
+#############################nichenetr-brain----------------------------------
+library(tidyverse)
+library(devtools)
+library(harmony)
+library(Seurat) 
+# 看相关与不相关差别 ---------------------------------------------------------
+
+getwd()
+setwd("F:\\暑假作业\\2022年暑假工作\\脑\\GSE141982_RAW\\")
+Seurat_cancer<-readRDS("Seurat_cancer.rds")
+Idents(Seurat_cancer) = 'cancer'
+Seurat_cancer<-Seurat_cancer[,Seurat_cancer$celltype=="Malignant"]
+Seudata<-readRDS("final_seurat.rds")
+
+
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "1"|substr(ab[,1],1,2) == "2"|substr(ab[,1],1,2) == "11")
+a<-ab[-index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+of_seurat<-cancer_a
+
+
+seurat<-readRDS("Seurat_cancer_allcell.rds")
+table(seurat$celltype)
+
+by_seurat<-seurat[,-which(colnames(seurat)%in%colnames(of_seurat))]
+
+table(by_seurat$celltype)
+
+
+of_seurat$aggregate<-"OF"
+
+by_seurat$aggregate<-"NOR"
+
+table(of_seurat$celltype)
+table(by_seurat$celltype)
+
+Seurat_cancer<-merge(x=of_seurat,y=by_seurat)
+table(Seurat_cancer$celltype)
+
+Seurat_cancer %>% Idents() %>% table()
+
+#查看信息
+Seurat_cancer@meta.data %>% head()
+Seurat_cancer
+
+Seurat_cancer[["percent.mt"]] <- PercentageFeatureSet(Seurat_cancer, pattern = "^MT-")
+VlnPlot(Seurat_cancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat_cancer<- subset(Seurat_cancer, subset =  nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt<20)
+
+Seurat_cancer<- NormalizeData(Seurat_cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+Seurat_cancer<- FindVariableFeatures(Seurat_cancer, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(Seurat_cancer) 
+Seurat_cancer <- ScaleData(Seurat_cancer, features = all.genes) 
+Seurat_cancer <- ScaleData(Seurat_cancer,vars.to.regress = "percent.mt") 
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+Seurat_cancer <- RunPCA(Seurat_cancer, features = Seurat_cancer@assays$RNA@var.features,npcs = 50)
+ElbowPlot(Seurat_cancer) 
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+ndim=30#根据上图确定
+Seurat_cancer<- FindNeighbors(Seurat_cancer, dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+Seurat_cancer <- RunUMAP(Seurat_cancer, reduction = "pca", dims = 1:ndim)
+p1<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "orig.ident",cols = c("#F9D23C", "#ED97CA"))
+p1#("#F64971", "#F7B6D2")
+p11<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "aggregate") 
+p11
+p2<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "seurat_clusters") 
+p2#("#F64971", "#F7B6D2")
+p3<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "celltype")
+p3#("#F64971", "#F7B6D2")
+table(Seurat_cancer$celltype)
+
+Idents(Seurat_cancer) = Seurat_cancer$celltype
+#准备NicheNet-----------------
+# devtools::install_github("saeyslab/nichenetr")
+library(circlize)
+library(nichenetr)
+library(Seurat) # please update to Seurat V4
+library(tidyverse)
+#1.读入NicheNet的配体-受体先验模型，配体-受体网络和加权整合网络------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\nichenetr\\")
+ligand_target_matrix = readRDS("ligand_target_matrix.rds")
+ligand_target_matrix[1:5,1:5] #target genes in rows, ligands in columns
+
+lr_network = readRDS("lr_network.rds")
+head(lr_network)
+
+
+weighted_networks = readRDS("weighted_networks.rds")
+head(weighted_networks$lr_sig) # interactions and their weights in the ligand-receptor + signaling network
+
+head(weighted_networks$gr) # interactions and their weights in the gene regulatory network
+
+#2.2 读入注释好的Seurat对象
+#seuratObj = readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\徐盟佳-细胞互作数据\\细胞互作数据\\Data\\肺\\肺发育相关(癌症+免疫细胞).rds")
+#seuratObj = readRDS("seuratObj.rds")
+
+seuratObj <- Seurat_cancer
+
+seuratObj@meta.data %>% head()
+
+seuratObj
+
+table(seuratObj$celltype)
+#设置分组类型，可为celltype
+
+#Idents(seuratObj) <- “group”
+#2.指定Sender细胞和Receiver细胞,确定Background基因--------------------
+
+## receiver
+receiver= c("Malignant")
+expressed_genes_receiver = get_expressed_genes(receiver, seuratObj, pct = 0.10)
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+
+#以下适用于多个细胞亚群者
+# list_expressed_genes_receiver = receiver_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every receiver cell type separately here
+# expressed_genes_receiver = list_expressed_genes_receiver %>% unlist() %>% unique()
+
+
+##sender
+sender_celltypes = c("CD8Tem","Endothelial", "M2")
+list_expressed_genes_sender = sender_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every sender cell type separately here
+expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+
+
+#3.找到感兴趣的基因集，如Receiver细胞中差异表达的基因-------------------
+seurat_obj_receiver= subset(seuratObj, idents = receiver)
+seurat_obj_receiver = SetIdent(seurat_obj_receiver, value = seurat_obj_receiver[["aggregate"]])
+
+condition_oi = "OF"
+condition_reference = "NOR" 
+
+table(seurat_obj_receiver$aggregate)
+
+
+DE_table_receiver = FindMarkers(object = seurat_obj_receiver, ident.1 = condition_oi, ident.2 = condition_reference, min.pct = 0.10) %>% rownames_to_column("gene")
+
+geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+
+#5.选择ligand--------------
+ligands = lr_network %>% pull(from) %>% unique()
+receptors = lr_network %>% pull(to) %>% unique()
+
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+
+
+#6.配体活性分析-------------
+#NicheNet根据它们的pearson相关系数对配体进行排名。
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+
+ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+
+#选择前20个
+best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+
+#这些配体由一个或多个输入发送器细胞表达。要查看哪个细胞群体表达这些顶级配体中的哪一个，您可以运行以下操作：
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), cols = "RdYlBu") + RotatedAxis()
+
+#观察这些配体癌胚细胞中是否有有差异表达
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), split.by = "aggregate") + RotatedAxis()
+#ggsave("top20_ligands_compare.png", p, width = 12, height = 8)
+
+#用小提琴图对比配体的表达情况
+#VlnPlot(seuratObj, features = best_upstream_ligands, split.by = "aggregate", pt.size = 0, combine = T)
+#ggsave("VlnPlot_ligands_compare.png", p, width = 24, height = 16)
+#feature后面没有加%>% rev()，出图的基因顺序就和前两个图相反
+
+
+#7. 受配体配对分析---------------------------------
+#推断配体活性分析中排名靠前的配体的受体和最预测的靶基因
+
+
+#（1）Active target gene inference
+active_ligand_target_links_df = best_upstream_ligands %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.33)
+
+order_ligands = intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + 
+  theme(axis.text.x = element_text(face = "italic")) + 
+  # scale_fill_gradient2(low = "whitesmoke",  high = "royalblue", breaks = c(0,0.0045,0.0090))+
+  xlab("OF response genes in maligant cells") + ylab("Prioritized NOR cell ligands")
+p_ligand_target_network
+
+
+
+#（2）Receptors of top-ranked ligands
+
+lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+
+lr_network_top_df_large = weighted_networks$lr_sig %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+
+lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+
+dist_receptors = dist(lr_network_top_matrix, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix))
+
+vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+p_ligand_receptor_network
+
+#（3）Receptors of top-ranked ligands, 
+#but after considering only bona fide ligand-receptor interactions documented in 
+#literature and publicly available databases
+# 顶级配体的受体，但仅考虑文献和公开数据库中记录的真正配体-受体相互作用
+
+# 它说的bona fide interaction是说有文献报道的受配体，我不太赞同
+# 在被去掉的很多受配体对也有文献报道
+# 这一步我认为意义不太大
+lr_network_strict = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+ligands_bona_fide = lr_network_strict %>% pull(from) %>% unique()
+receptors_bona_fide = lr_network_strict %>% pull(to) %>% unique()
+
+lr_network_top_df_large_strict = lr_network_top_df_large %>% distinct(from,to) %>% inner_join(lr_network_strict, by = c("from","to")) %>% distinct(from,to)
+lr_network_top_df_large_strict = lr_network_top_df_large_strict %>% inner_join(lr_network_top_df_large, by = c("from","to"))
+
+lr_network_top_df_strict = lr_network_top_df_large_strict %>% spread("from","weight",fill = 0)
+lr_network_top_matrix_strict = lr_network_top_df_strict %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df_strict$to)
+
+dist_receptors = dist(lr_network_top_matrix_strict, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix_strict %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix_strict))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix_strict))
+
+vis_ligand_receptor_network_strict = lr_network_top_matrix_strict[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network_strict) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network_strict) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network_strict = vis_ligand_receptor_network_strict %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential\n(bona fide)")
+p_ligand_receptor_network_strict
+
+#9.Summary visualizations of the NicheNet analysis
+#做一个整合的图
+# ligand activity heatmap
+ligand_pearson_matrix = ligand_activities %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities$test_ligand)
+
+rownames(ligand_pearson_matrix) = rownames(ligand_pearson_matrix) %>% make.names()
+colnames(ligand_pearson_matrix) = colnames(ligand_pearson_matrix) %>% make.names()
+
+vis_ligand_pearson = ligand_pearson_matrix[order_ligands, ] %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Pearson")
+p_ligand_pearson = vis_ligand_pearson %>% make_heatmap_ggplot("Prioritized ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)") + theme(legend.text = element_text(size = 9))
+
+# ligand expression Seurat dotplot
+order_ligands_adapted = order_ligands
+order_ligands_adapted[order_ligands_adapted == "H2.M3"] = "H2-M3" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+order_ligands_adapted[order_ligands_adapted == "H2.T23"] = "H2-T23" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+rotated_dotplot = DotPlot(seuratObj %>% subset(celltype %in% sender_celltypes), features = order_ligands_adapted, cols = "RdYlBu") + coord_flip() + theme(legend.text = element_text(size = 10), legend.title = element_text(size = 12)) # flip of coordinates necessary because we want to show ligands in the rows when combining all plots
+
+figures_without_legend = cowplot::plot_grid(
+  p_ligand_pearson + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()),
+  rotated_dotplot + theme(legend.position = "none", axis.ticks = element_blank(), axis.title.x = element_text(size = 12), axis.text.y = element_text(face = "italic", size = 9), axis.text.x = element_text(size = 9,  angle = 90,hjust = 0)) + ylab("Expression in Sender") + xlab("") + scale_y_discrete(position = "right"),
+  p_ligand_lfc + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()) + ylab(""),
+  p_ligand_target_network + theme(legend.position = "none", axis.ticks = element_blank()) + ylab(""),
+  align = "hv",
+  nrow = 1,
+  rel_widths = c(ncol(vis_ligand_pearson)+6, ncol(vis_ligand_lfc) + 7, ncol(vis_ligand_lfc) + 8, ncol(vis_ligand_target)))
+
+legends = cowplot::plot_grid(
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_pearson)),
+  ggpubr::as_ggplot(ggpubr::get_legend(rotated_dotplot)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_lfc)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target_network)),
+  nrow = 1,
+  align = "h", rel_widths = c(1.5, 1, 1, 1))
+
+combined_plot = cowplot::plot_grid(figures_without_legend, legends, rel_heights = c(10,5), nrow = 2, align = "hv")
+combined_plot
+
+#############################nichenetr-kidney----------------------------------
+
+library(tidyverse)
+library(devtools)
+library(harmony)
+library(Seurat) 
+#对数据进行seurat标准流程---------------
+setwd("F:\\暑假作业\\2022年暑假工作\\肾\\GSE171306\\")
+seurat<-readRDS("Seurat_cancer.rds")
+
+table(seurat$celltype)
+
+of_seurat<-readRDS("cancer_a后.rds")
+
+table(of_seurat$celltype)
+
+#将细胞按照癌胚样和旁观者来分组
+by_seurat<-seurat[,-which(colnames(seurat)%in%colnames(of_seurat))]
+table(by_seurat$celltype)
+
+of_seurat$aggregate<-"OF"
+by_seurat$aggregate<-"NOR"
+table(of_seurat$celltype)
+table(by_seurat$celltype)
+
+Seurat_cancer<-merge(x=of_seurat,y=by_seurat)
+table(Seurat_cancer$celltype)
+
+Seurat_cancer %>% Idents() %>% table()
+#查看信息
+Seurat_cancer@meta.data %>% head()
+Seurat_cancer
+
+Seurat_cancer[["percent.mt"]] <- PercentageFeatureSet(Seurat_cancer, pattern = "^MT-")
+VlnPlot(Seurat_cancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat_cancer<- subset(Seurat_cancer, subset =  nFeature_RNA > 200 & nFeature_RNA < 7000 & percent.mt<20)
+
+Seurat_cancer<- NormalizeData(Seurat_cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+Seurat_cancer<- FindVariableFeatures(Seurat_cancer, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(Seurat_cancer) 
+Seurat_cancer <- ScaleData(Seurat_cancer, features = all.genes) 
+Seurat_cancer <- ScaleData(Seurat_cancer,vars.to.regress = "percent.mt") 
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+Seurat_cancer <- RunPCA(Seurat_cancer, features = Seurat_cancer@assays$RNA@var.features,npcs = 50)
+ElbowPlot(Seurat_cancer) 
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+ndim=30#根据上图确定
+Seurat_cancer<- FindNeighbors(Seurat_cancer, dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+Seurat_cancer <- RunUMAP(Seurat_cancer, reduction = "pca", dims = 1:ndim)
+p1<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "orig.ident",cols = c("#F9D23C", "#ED97CA"))
+p1#("#F64971", "#F7B6D2")
+p11<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "aggregate") 
+p11
+p2<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "seurat_clusters") 
+p2#("#F64971", "#F7B6D2")
+p3<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "celltype")
+p3#("#F64971", "#F7B6D2")
+table(Seurat_cancer$celltype)
+
+Idents(Seurat_cancer) = Seurat_cancer$celltype
+#准备NicheNet-----------------
+# devtools::install_github("saeyslab/nichenetr")
+library(circlize)
+library(nichenetr)
+library(Seurat) # please update to Seurat V4
+library(tidyverse)
+#1.读入NicheNet的配体-受体先验模型，配体-受体网络和加权整合网络------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\nichenetr\\")
+ligand_target_matrix = readRDS("ligand_target_matrix.rds")
+ligand_target_matrix[1:5,1:5] #target genes in rows, ligands in columns
+
+lr_network = readRDS("lr_network.rds")
+head(lr_network)
+
+
+weighted_networks = readRDS("weighted_networks.rds")
+head(weighted_networks$lr_sig) # interactions and their weights in the ligand-receptor + signaling network
+
+head(weighted_networks$gr) # interactions and their weights in the gene regulatory network
+
+#2.2 读入注释好的Seurat对象
+#seuratObj = readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\徐盟佳-细胞互作数据\\细胞互作数据\\Data\\肺\\肺发育相关(癌症+免疫细胞).rds")
+#seuratObj = readRDS("seuratObj.rds")
+
+seuratObj <- Seurat_cancer
+
+seuratObj@meta.data %>% head()
+
+seuratObj
+
+table(seuratObj$celltype)
+#设置分组类型，可为celltype
+
+#Idents(seuratObj) <- “group”
+#2.指定Sender细胞和Receiver细胞,确定Background基因--------------------
+
+## receiver
+receiver= c("Malignant")
+expressed_genes_receiver = get_expressed_genes(receiver, seuratObj, pct = 0.10)
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+
+#以下适用于多个细胞亚群者
+# list_expressed_genes_receiver = receiver_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every receiver cell type separately here
+# expressed_genes_receiver = list_expressed_genes_receiver %>% unlist() %>% unique()
+
+
+##sender
+sender_celltypes = c("CD4Tconv","CD8T", "Endothelial","Fibroblasts","Mast","Mono/Macro","Neutrophils","NK","Tprolif")
+list_expressed_genes_sender = sender_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every sender cell type separately here
+expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+
+
+#3.找到感兴趣的基因集，如Receiver细胞中差异表达的基因-------------------
+seurat_obj_receiver= subset(seuratObj, idents = receiver)
+seurat_obj_receiver = SetIdent(seurat_obj_receiver, value = seurat_obj_receiver[["aggregate"]])
+
+condition_oi = "OF"
+condition_reference = "NOR" 
+
+table(seurat_obj_receiver$aggregate)
+
+
+DE_table_receiver = FindMarkers(object = seurat_obj_receiver, ident.1 = condition_oi, ident.2 = condition_reference, min.pct = 0.10) %>% rownames_to_column("gene")
+
+geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+
+#5.选择ligand--------------
+ligands = lr_network %>% pull(from) %>% unique()
+receptors = lr_network %>% pull(to) %>% unique()
+
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+
+
+#6.配体活性分析-------------
+#NicheNet根据它们的pearson相关系数对配体进行排名。
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+
+ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+
+#选择前20个
+best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+
+#这些配体由一个或多个输入发送器细胞表达。要查看哪个细胞群体表达这些顶级配体中的哪一个，您可以运行以下操作：
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), cols = "RdYlBu") + RotatedAxis()
+
+#观察这些配体癌胚细胞中是否有有差异表达
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), split.by = "aggregate") + RotatedAxis()
+#ggsave("top20_ligands_compare.png", p, width = 12, height = 8)
+
+#用小提琴图对比配体的表达情况
+#VlnPlot(seuratObj, features = best_upstream_ligands, split.by = "aggregate", pt.size = 0, combine = T)
+#ggsave("VlnPlot_ligands_compare.png", p, width = 24, height = 16)
+#feature后面没有加%>% rev()，出图的基因顺序就和前两个图相反
+
+
+#7. 受配体配对分析---------------------------------
+#推断配体活性分析中排名靠前的配体的受体和最预测的靶基因
+
+
+#（1）Active target gene inference
+active_ligand_target_links_df = best_upstream_ligands %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.33)
+
+order_ligands = intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + 
+  theme(axis.text.x = element_text(face = "italic")) + 
+  # scale_fill_gradient2(low = "whitesmoke",  high = "royalblue", breaks = c(0,0.0045,0.0090))+
+  xlab("OF response genes in maligant cells") + ylab("Prioritized NOR cell ligands")
+p_ligand_target_network
+
+
+
+#（2）Receptors of top-ranked ligands
+
+lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+
+lr_network_top_df_large = weighted_networks$lr_sig %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+
+lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+
+dist_receptors = dist(lr_network_top_matrix, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix))
+
+vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+p_ligand_receptor_network
+
+#（3）Receptors of top-ranked ligands, 
+#but after considering only bona fide ligand-receptor interactions documented in 
+#literature and publicly available databases
+# 顶级配体的受体，但仅考虑文献和公开数据库中记录的真正配体-受体相互作用
+
+# 它说的bona fide interaction是说有文献报道的受配体，我不太赞同
+# 在被去掉的很多受配体对也有文献报道
+# 这一步我认为意义不太大
+lr_network_strict = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+ligands_bona_fide = lr_network_strict %>% pull(from) %>% unique()
+receptors_bona_fide = lr_network_strict %>% pull(to) %>% unique()
+
+lr_network_top_df_large_strict = lr_network_top_df_large %>% distinct(from,to) %>% inner_join(lr_network_strict, by = c("from","to")) %>% distinct(from,to)
+lr_network_top_df_large_strict = lr_network_top_df_large_strict %>% inner_join(lr_network_top_df_large, by = c("from","to"))
+
+lr_network_top_df_strict = lr_network_top_df_large_strict %>% spread("from","weight",fill = 0)
+lr_network_top_matrix_strict = lr_network_top_df_strict %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df_strict$to)
+
+dist_receptors = dist(lr_network_top_matrix_strict, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix_strict %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix_strict))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix_strict))
+
+vis_ligand_receptor_network_strict = lr_network_top_matrix_strict[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network_strict) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network_strict) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network_strict = vis_ligand_receptor_network_strict %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential\n(bona fide)")
+p_ligand_receptor_network_strict
+
+#9.Summary visualizations of the NicheNet analysis
+#做一个整合的图
+# ligand activity heatmap
+ligand_pearson_matrix = ligand_activities %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities$test_ligand)
+
+rownames(ligand_pearson_matrix) = rownames(ligand_pearson_matrix) %>% make.names()
+colnames(ligand_pearson_matrix) = colnames(ligand_pearson_matrix) %>% make.names()
+
+vis_ligand_pearson = ligand_pearson_matrix[order_ligands, ] %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Pearson")
+p_ligand_pearson = vis_ligand_pearson %>% make_heatmap_ggplot("Prioritized ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)") + theme(legend.text = element_text(size = 9))
+
+# ligand expression Seurat dotplot
+order_ligands_adapted = order_ligands
+order_ligands_adapted[order_ligands_adapted == "H2.M3"] = "H2-M3" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+order_ligands_adapted[order_ligands_adapted == "H2.T23"] = "H2-T23" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+rotated_dotplot = DotPlot(seuratObj %>% subset(celltype %in% sender_celltypes), features = order_ligands_adapted, cols = "RdYlBu") + coord_flip() + theme(legend.text = element_text(size = 10), legend.title = element_text(size = 12)) # flip of coordinates necessary because we want to show ligands in the rows when combining all plots
+
+figures_without_legend = cowplot::plot_grid(
+  p_ligand_pearson + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()),
+  rotated_dotplot + theme(legend.position = "none", axis.ticks = element_blank(), axis.title.x = element_text(size = 12), axis.text.y = element_text(face = "italic", size = 9), axis.text.x = element_text(size = 9,  angle = 90,hjust = 0)) + ylab("Expression in Sender") + xlab("") + scale_y_discrete(position = "right"),
+  p_ligand_lfc + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()) + ylab(""),
+  p_ligand_target_network + theme(legend.position = "none", axis.ticks = element_blank()) + ylab(""),
+  align = "hv",
+  nrow = 1,
+  rel_widths = c(ncol(vis_ligand_pearson)+6, ncol(vis_ligand_lfc) + 7, ncol(vis_ligand_lfc) + 8, ncol(vis_ligand_target)))
+
+legends = cowplot::plot_grid(
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_pearson)),
+  ggpubr::as_ggplot(ggpubr::get_legend(rotated_dotplot)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_lfc)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target_network)),
+  nrow = 1,
+  align = "h", rel_widths = c(1.5, 1, 1, 1))
+
+combined_plot = cowplot::plot_grid(figures_without_legend, legends, rel_heights = c(10,5), nrow = 2, align = "hv")
+combined_plot
+
+
+
+
+#############################nichenetr-stomach----------------------------------
+library(tidyverse)
+library(devtools)
+library(harmony)
+library(Seurat) 
+#对数据进行seurat标准流程---------------
+setwd("F:\\暑假作业\\2022年暑假工作\\胃\\使用TISCH注释\\")
+seurat<-readRDS("Seurat_cancer.rds")
+
+table(seurat$celltype)
+
+of_seurat<-readRDS("cancer_a后.rds")
+
+table(of_seurat$celltype)
+
+#将细胞按照癌胚样和旁观者来分组
+by_seurat<-seurat[,-which(colnames(seurat)%in%colnames(of_seurat))]
+table(by_seurat$celltype)
+
+of_seurat$aggregate<-"OF"
+by_seurat$aggregate<-"NOR"
+table(of_seurat$celltype)
+table(by_seurat$celltype)
+
+Seurat_cancer<-merge(x=of_seurat,y=by_seurat)
+table(Seurat_cancer$celltype)
+
+Seurat_cancer %>% Idents() %>% table()
+#查看信息
+Seurat_cancer@meta.data %>% head()
+Seurat_cancer
+
+Seurat_cancer[["percent.mt"]] <- PercentageFeatureSet(Seurat_cancer, pattern = "^MT-")
+VlnPlot(Seurat_cancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat_cancer<- subset(Seurat_cancer, subset =  nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt<20)
+
+Seurat_cancer<- NormalizeData(Seurat_cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+Seurat_cancer<- FindVariableFeatures(Seurat_cancer, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(Seurat_cancer) 
+Seurat_cancer <- ScaleData(Seurat_cancer, features = all.genes) 
+Seurat_cancer <- ScaleData(Seurat_cancer,vars.to.regress = "percent.mt") 
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+Seurat_cancer <- RunPCA(Seurat_cancer, features = Seurat_cancer@assays$RNA@var.features,npcs = 50)
+ElbowPlot(Seurat_cancer) 
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+ndim=30#根据上图确定
+Seurat_cancer<- FindNeighbors(Seurat_cancer, dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+Seurat_cancer <- RunUMAP(Seurat_cancer, reduction = "pca", dims = 1:ndim)
+p1<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "orig.ident",cols = c("#F9D23C", "#ED97CA"))
+p1#("#F64971", "#F7B6D2")
+p11<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "aggregate") 
+p11
+p2<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "seurat_clusters") 
+p2#("#F64971", "#F7B6D2")
+p3<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "celltype")
+p3#("#F64971", "#F7B6D2")
+table(Seurat_cancer$aggregate)
+
+Idents(Seurat_cancer) = Seurat_cancer$celltype
+#准备NicheNet-----------------
+# devtools::install_github("saeyslab/nichenetr")
+library(circlize)
+library(nichenetr)
+library(Seurat) # please update to Seurat V4
+library(tidyverse)
+#1.读入NicheNet的配体-受体先验模型，配体-受体网络和加权整合网络------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\nichenetr\\")
+ligand_target_matrix = readRDS("ligand_target_matrix.rds")
+ligand_target_matrix[1:5,1:5] #target genes in rows, ligands in columns
+
+lr_network = readRDS("lr_network.rds")
+head(lr_network)
+
+
+weighted_networks = readRDS("weighted_networks.rds")
+head(weighted_networks$lr_sig) # interactions and their weights in the ligand-receptor + signaling network
+
+head(weighted_networks$gr) # interactions and their weights in the gene regulatory network
+
+#2.2 读入注释好的Seurat对象
+#seuratObj = readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\徐盟佳-细胞互作数据\\细胞互作数据\\Data\\肺\\肺发育相关(癌症+免疫细胞).rds")
+#seuratObj = readRDS("seuratObj.rds")
+
+seuratObj <- Seurat_cancer
+
+seuratObj@meta.data %>% head()
+
+seuratObj
+table(seuratObj$celltype)
+
+#设置分组类型，可为celltype
+
+#Idents(seuratObj) <- “group”
+#2.指定Sender细胞和Receiver细胞,确定Background基因--------------------
+
+## receiver
+receiver= c("Malignant")
+expressed_genes_receiver = get_expressed_genes(receiver, seuratObj, pct = 0.10)
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+
+#以下适用于多个细胞亚群者
+# list_expressed_genes_receiver = receiver_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every receiver cell type separately here
+# expressed_genes_receiver = list_expressed_genes_receiver %>% unlist() %>% unique()
+
+
+##sender
+sender_celltypes = c("CD8Tcm","cDC2", "Fibroblasts","Gland mucous","Mast","Myofibroblasts","Pit mucous","Plasma")
+list_expressed_genes_sender = sender_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every sender cell type separately here
+expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+
+
+#3.找到感兴趣的基因集，如Receiver细胞中差异表达的基因-------------------
+seurat_obj_receiver= subset(seuratObj, idents = receiver)
+seurat_obj_receiver = SetIdent(seurat_obj_receiver, value = seurat_obj_receiver[["aggregate"]])
+
+condition_oi = "OF"
+condition_reference = "NOR" 
+
+table(seurat_obj_receiver$aggregate)
+
+
+DE_table_receiver = FindMarkers(object = seurat_obj_receiver, ident.1 = condition_oi, ident.2 = condition_reference, min.pct = 0.10) %>% rownames_to_column("gene")
+
+geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+
+#5.选择ligand--------------
+ligands = lr_network %>% pull(from) %>% unique()
+receptors = lr_network %>% pull(to) %>% unique()
+
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+
+
+#6.配体活性分析-------------
+#NicheNet根据它们的pearson相关系数对配体进行排名。
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+
+ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+
+#选择前20个
+best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+
+#这些配体由一个或多个输入发送器细胞表达。要查看哪个细胞群体表达这些顶级配体中的哪一个，您可以运行以下操作：
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), cols = "RdYlBu") + RotatedAxis()
+
+#观察这些配体癌胚细胞中是否有有差异表达
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), split.by = "aggregate") + RotatedAxis()
+#ggsave("top20_ligands_compare.png", p, width = 12, height = 8)
+
+#用小提琴图对比配体的表达情况
+VlnPlot(seuratObj, features = best_upstream_ligands, split.by = "aggregate", pt.size = 0, combine = T)
+#ggsave("VlnPlot_ligands_compare.png", p, width = 24, height = 16)
+#feature后面没有加%>% rev()，出图的基因顺序就和前两个图相反
+
+
+#7. 受配体配对分析---------------------------------
+#推断配体活性分析中排名靠前的配体的受体和最预测的靶基因
+
+
+#（1）Active target gene inference
+active_ligand_target_links_df = best_upstream_ligands %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.33)
+
+order_ligands = intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + 
+  theme(axis.text.x = element_text(face = "italic")) + 
+  # scale_fill_gradient2(low = "whitesmoke",  high = "royalblue", breaks = c(0,0.0045,0.0090))+
+  xlab("OF response genes in maligant cells") + ylab("Prioritized NOR cell ligands")
+p_ligand_target_network
+
+
+
+#（2）Receptors of top-ranked ligands
+
+lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+
+lr_network_top_df_large = weighted_networks$lr_sig %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+
+lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+
+dist_receptors = dist(lr_network_top_matrix, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix))
+
+vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+p_ligand_receptor_network
+
+#（3）Receptors of top-ranked ligands, 
+#but after considering only bona fide ligand-receptor interactions documented in 
+#literature and publicly available databases
+# 顶级配体的受体，但仅考虑文献和公开数据库中记录的真正配体-受体相互作用
+
+# 它说的bona fide interaction是说有文献报道的受配体，我不太赞同
+# 在被去掉的很多受配体对也有文献报道
+# 这一步我认为意义不太大
+lr_network_strict = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+ligands_bona_fide = lr_network_strict %>% pull(from) %>% unique()
+receptors_bona_fide = lr_network_strict %>% pull(to) %>% unique()
+
+lr_network_top_df_large_strict = lr_network_top_df_large %>% distinct(from,to) %>% inner_join(lr_network_strict, by = c("from","to")) %>% distinct(from,to)
+lr_network_top_df_large_strict = lr_network_top_df_large_strict %>% inner_join(lr_network_top_df_large, by = c("from","to"))
+
+lr_network_top_df_strict = lr_network_top_df_large_strict %>% spread("from","weight",fill = 0)
+lr_network_top_matrix_strict = lr_network_top_df_strict %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df_strict$to)
+
+dist_receptors = dist(lr_network_top_matrix_strict, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix_strict %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix_strict))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix_strict))
+
+vis_ligand_receptor_network_strict = lr_network_top_matrix_strict[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network_strict) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network_strict) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network_strict = vis_ligand_receptor_network_strict %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential\n(bona fide)")
+p_ligand_receptor_network_strict
+
+#9.Summary visualizations of the NicheNet analysis
+#做一个整合的图
+# ligand activity heatmap
+ligand_pearson_matrix = ligand_activities %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities$test_ligand)
+
+rownames(ligand_pearson_matrix) = rownames(ligand_pearson_matrix) %>% make.names()
+colnames(ligand_pearson_matrix) = colnames(ligand_pearson_matrix) %>% make.names()
+
+vis_ligand_pearson = ligand_pearson_matrix[order_ligands, ] %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Pearson")
+p_ligand_pearson = vis_ligand_pearson %>% make_heatmap_ggplot("Prioritized ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)") + theme(legend.text = element_text(size = 9))
+
+# ligand expression Seurat dotplot
+order_ligands_adapted = order_ligands
+order_ligands_adapted[order_ligands_adapted == "H2.M3"] = "H2-M3" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+order_ligands_adapted[order_ligands_adapted == "H2.T23"] = "H2-T23" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+rotated_dotplot = DotPlot(seuratObj %>% subset(celltype %in% sender_celltypes), features = order_ligands_adapted, cols = "RdYlBu") + coord_flip() + theme(legend.text = element_text(size = 10), legend.title = element_text(size = 12)) # flip of coordinates necessary because we want to show ligands in the rows when combining all plots
+
+figures_without_legend = cowplot::plot_grid(
+  p_ligand_pearson + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()),
+  rotated_dotplot + theme(legend.position = "none", axis.ticks = element_blank(), axis.title.x = element_text(size = 12), axis.text.y = element_text(face = "italic", size = 9), axis.text.x = element_text(size = 9,  angle = 90,hjust = 0)) + ylab("Expression in Sender") + xlab("") + scale_y_discrete(position = "right"),
+  p_ligand_lfc + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()) + ylab(""),
+  p_ligand_target_network + theme(legend.position = "none", axis.ticks = element_blank()) + ylab(""),
+  align = "hv",
+  nrow = 1,
+  rel_widths = c(ncol(vis_ligand_pearson)+6, ncol(vis_ligand_lfc) + 7, ncol(vis_ligand_lfc) + 8, ncol(vis_ligand_target)))
+
+legends = cowplot::plot_grid(
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_pearson)),
+  ggpubr::as_ggplot(ggpubr::get_legend(rotated_dotplot)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_lfc)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target_network)),
+  nrow = 1,
+  align = "h", rel_widths = c(1.5, 1, 1, 1))
+
+combined_plot = cowplot::plot_grid(figures_without_legend, legends, rel_heights = c(10,5), nrow = 2, align = "hv")
+combined_plot
+
+
+
+
+#############################nichenetr-pancreas----------------------------------
+
+
+library(tidyverse)
+library(devtools)
+library(harmony)
+library(Seurat) 
+# 看相关与不相关差别 ---------------------------------------------------------
+
+getwd()
+setwd("F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息（CRA001160）胰腺\\")
+Seurat_cancer<-readRDS("F:\\暑假作业\\2022年暑假工作\\胰腺\\癌症\\使用TISCH注释信息（CRA001160）胰腺\\Seurat_cancer.rds")
+Idents(Seurat_cancer) = 'cancer'
+table(Seurat_cancer$celltype)
+Seurat_cancer<-Seurat_cancer[,Seurat_cancer$celltype=="Malignant"]
+Seudata<-readRDS("final_seurat.rds")
+
+
+Seudata<-Seudata[,-which(Seudata$orig.ident=="baby")]
+b<-as.data.frame(Seudata@active.ident)
+bb<-as.data.frame(Seudata@meta.data$orig.ident)
+bb1<-as.data.frame(Seudata@meta.data$celltype)
+bbb<-cbind(b,bb)
+bbb<-cbind(bbb,bb1)
+ab<-bbb
+
+
+#发育相关a
+index2 <- which(substr(ab[,1],1,2) == "0"|substr(ab[,1],1,2) == "1")
+a<-ab[index2,]
+cancer_a<-Seurat_cancer[,rownames(a)]
+
+of_seurat<-cancer_a
+
+
+seurat<-readRDS("Seurat_cancer.rds")
+table(seurat$celltype)
+
+by_seurat<-seurat[,-which(colnames(seurat)%in%colnames(of_seurat))]
+
+table(by_seurat$celltype)
+
+
+of_seurat$aggregate<-"OF"
+
+by_seurat$aggregate<-"NOR"
+
+table(of_seurat$celltype)
+table(by_seurat$celltype)
+
+Seurat_cancer<-merge(x=of_seurat,y=by_seurat)
+table(Seurat_cancer$celltype)
+
+Seurat_cancer %>% Idents() %>% table()
+
+#查看信息
+Seurat_cancer@meta.data %>% head()
+Seurat_cancer
+
+Seurat_cancer[["percent.mt"]] <- PercentageFeatureSet(Seurat_cancer, pattern = "^MT-")
+VlnPlot(Seurat_cancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat_cancer<- subset(Seurat_cancer, subset =  nFeature_RNA > 200 & nFeature_RNA < 7000 & percent.mt<10)
+
+Seurat_cancer<- NormalizeData(Seurat_cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+Seurat_cancer<- FindVariableFeatures(Seurat_cancer, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(Seurat_cancer) 
+Seurat_cancer <- ScaleData(Seurat_cancer, features = all.genes) 
+Seurat_cancer <- ScaleData(Seurat_cancer,vars.to.regress = "percent.mt") 
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+Seurat_cancer <- RunPCA(Seurat_cancer, features = Seurat_cancer@assays$RNA@var.features,npcs = 50)
+ElbowPlot(Seurat_cancer) 
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+ndim=30#根据上图确定
+Seurat_cancer<- FindNeighbors(Seurat_cancer, dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+Seurat_cancer <- RunUMAP(Seurat_cancer, reduction = "pca", dims = 1:ndim)
+p1<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "orig.ident",cols = c("#F9D23C", "#ED97CA"))
+p1#("#F64971", "#F7B6D2")
+p11<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "aggregate") 
+p11
+p2<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "seurat_clusters") 
+p2#("#F64971", "#F7B6D2")
+p3<-DimPlot(Seurat_cancer, reduction = "umap",group.by = "celltype")
+p3#("#F64971", "#F7B6D2")
+table(Seurat_cancer$celltype)
+
+Idents(Seurat_cancer) = Seurat_cancer$celltype
+#准备NicheNet-----------------
+# devtools::install_github("saeyslab/nichenetr")
+library(circlize)
+library(nichenetr)
+library(Seurat) # please update to Seurat V4
+library(tidyverse)
+#1.读入NicheNet的配体-受体先验模型，配体-受体网络和加权整合网络------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\nichenetr\\")
+ligand_target_matrix = readRDS("ligand_target_matrix.rds")
+ligand_target_matrix[1:5,1:5] #target genes in rows, ligands in columns
+
+lr_network = readRDS("lr_network.rds")
+head(lr_network)
+
+
+weighted_networks = readRDS("weighted_networks.rds")
+head(weighted_networks$lr_sig) # interactions and their weights in the ligand-receptor + signaling network
+
+head(weighted_networks$gr) # interactions and their weights in the gene regulatory network
+
+#2.2 读入注释好的Seurat对象
+#seuratObj = readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\徐盟佳-细胞互作数据\\细胞互作数据\\Data\\肺\\肺发育相关(癌症+免疫细胞).rds")
+#seuratObj = readRDS("seuratObj.rds")
+
+seuratObj <- Seurat_cancer
+
+seuratObj@meta.data %>% head()
+
+seuratObj
+table(seuratObj$celltype)
+
+#设置分组类型，可为celltype
+
+#Idents(seuratObj) <- “group”
+#2.指定Sender细胞和Receiver细胞,确定Background基因--------------------
+
+## receiver
+receiver= c("Malignant")
+expressed_genes_receiver = get_expressed_genes(receiver, seuratObj, pct = 0.10)
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+
+#以下适用于多个细胞亚群者
+# list_expressed_genes_receiver = receiver_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every receiver cell type separately here
+# expressed_genes_receiver = list_expressed_genes_receiver %>% unlist() %>% unique()
+
+
+##sender
+sender_celltypes = c("Acinar","B", "CD8Tex","Ductal","Endocrine","Endothelial","Fibroblasts","M1","Monocyte","pDC","Plasma","Stellate")
+list_expressed_genes_sender = sender_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every sender cell type separately here
+expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+
+
+#3.找到感兴趣的基因集，如Receiver细胞中差异表达的基因-------------------
+seurat_obj_receiver= subset(seuratObj, idents = receiver)
+seurat_obj_receiver = SetIdent(seurat_obj_receiver, value = seurat_obj_receiver[["aggregate"]])
+
+condition_oi = "OF"
+condition_reference = "NOR" 
+
+table(seurat_obj_receiver$aggregate)
+
+
+DE_table_receiver = FindMarkers(object = seurat_obj_receiver, ident.1 = condition_oi, ident.2 = condition_reference, min.pct = 0.10) %>% rownames_to_column("gene")
+
+geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+
+#5.选择ligand--------------
+ligands = lr_network %>% pull(from) %>% unique()
+receptors = lr_network %>% pull(to) %>% unique()
+
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+
+
+#6.配体活性分析-------------
+#NicheNet根据它们的pearson相关系数对配体进行排名。
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+
+ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+
+#选择前20个
+best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+
+#这些配体由一个或多个输入发送器细胞表达。要查看哪个细胞群体表达这些顶级配体中的哪一个，您可以运行以下操作：
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), cols = "RdYlBu") + RotatedAxis()
+
+#观察这些配体癌胚细胞中是否有有差异表达
+DotPlot(seuratObj, features = best_upstream_ligands %>% rev(), split.by = "aggregate") + RotatedAxis()
+#ggsave("top20_ligands_compare.png", p, width = 12, height = 8)
+
+#用小提琴图对比配体的表达情况
+#VlnPlot(seuratObj, features = best_upstream_ligands, split.by = "aggregate", pt.size = 0, combine = T)
+#ggsave("VlnPlot_ligands_compare.png", p, width = 24, height = 16)
+#feature后面没有加%>% rev()，出图的基因顺序就和前两个图相反
+
+
+#7. 受配体配对分析---------------------------------
+#推断配体活性分析中排名靠前的配体的受体和最预测的靶基因
+
+
+#（1）Active target gene inference
+active_ligand_target_links_df = best_upstream_ligands %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.33)
+
+order_ligands = intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + 
+  theme(axis.text.x = element_text(face = "italic")) + 
+  # scale_fill_gradient2(low = "whitesmoke",  high = "royalblue", breaks = c(0,0.0045,0.0090))+
+  xlab("OF response genes in maligant cells") + ylab("Prioritized NOR cell ligands")
+p_ligand_target_network
+
+
+
+#（2）Receptors of top-ranked ligands
+
+lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+
+lr_network_top_df_large = weighted_networks$lr_sig %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+
+lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+
+dist_receptors = dist(lr_network_top_matrix, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix))
+
+vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+p_ligand_receptor_network
+
+#（3）Receptors of top-ranked ligands, 
+#but after considering only bona fide ligand-receptor interactions documented in 
+#literature and publicly available databases
+# 顶级配体的受体，但仅考虑文献和公开数据库中记录的真正配体-受体相互作用
+
+# 它说的bona fide interaction是说有文献报道的受配体，我不太赞同
+# 在被去掉的很多受配体对也有文献报道
+# 这一步我认为意义不太大
+lr_network_strict = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+ligands_bona_fide = lr_network_strict %>% pull(from) %>% unique()
+receptors_bona_fide = lr_network_strict %>% pull(to) %>% unique()
+
+lr_network_top_df_large_strict = lr_network_top_df_large %>% distinct(from,to) %>% inner_join(lr_network_strict, by = c("from","to")) %>% distinct(from,to)
+lr_network_top_df_large_strict = lr_network_top_df_large_strict %>% inner_join(lr_network_top_df_large, by = c("from","to"))
+
+lr_network_top_df_strict = lr_network_top_df_large_strict %>% spread("from","weight",fill = 0)
+lr_network_top_matrix_strict = lr_network_top_df_strict %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df_strict$to)
+
+dist_receptors = dist(lr_network_top_matrix_strict, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix_strict %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix_strict))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix_strict))
+
+vis_ligand_receptor_network_strict = lr_network_top_matrix_strict[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network_strict) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network_strict) = order_ligands_receptor %>% make.names()
+p_ligand_receptor_network_strict = vis_ligand_receptor_network_strict %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential\n(bona fide)")
+p_ligand_receptor_network_strict
+
+#9.Summary visualizations of the NicheNet analysis
+#做一个整合的图
+# ligand activity heatmap
+ligand_pearson_matrix = ligand_activities %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities$test_ligand)
+
+rownames(ligand_pearson_matrix) = rownames(ligand_pearson_matrix) %>% make.names()
+colnames(ligand_pearson_matrix) = colnames(ligand_pearson_matrix) %>% make.names()
+
+vis_ligand_pearson = ligand_pearson_matrix[order_ligands, ] %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Pearson")
+p_ligand_pearson = vis_ligand_pearson %>% make_heatmap_ggplot("Prioritized ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)") + theme(legend.text = element_text(size = 9))
+
+# ligand expression Seurat dotplot
+order_ligands_adapted = order_ligands
+order_ligands_adapted[order_ligands_adapted == "H2.M3"] = "H2-M3" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+order_ligands_adapted[order_ligands_adapted == "H2.T23"] = "H2-T23" # cf required use of make.names for heatmap visualization | this is not necessary if these ligands are not in the list of prioritized ligands!
+rotated_dotplot = DotPlot(seuratObj %>% subset(celltype %in% sender_celltypes), features = order_ligands_adapted, cols = "RdYlBu") + coord_flip() + theme(legend.text = element_text(size = 10), legend.title = element_text(size = 12)) # flip of coordinates necessary because we want to show ligands in the rows when combining all plots
+
+figures_without_legend = cowplot::plot_grid(
+  p_ligand_pearson + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()),
+  rotated_dotplot + theme(legend.position = "none", axis.ticks = element_blank(), axis.title.x = element_text(size = 12), axis.text.y = element_text(face = "italic", size = 9), axis.text.x = element_text(size = 9,  angle = 90,hjust = 0)) + ylab("Expression in Sender") + xlab("") + scale_y_discrete(position = "right"),
+  p_ligand_lfc + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()) + ylab(""),
+  p_ligand_target_network + theme(legend.position = "none", axis.ticks = element_blank()) + ylab(""),
+  align = "hv",
+  nrow = 1,
+  rel_widths = c(ncol(vis_ligand_pearson)+6, ncol(vis_ligand_lfc) + 7, ncol(vis_ligand_lfc) + 8, ncol(vis_ligand_target)))
+
+legends = cowplot::plot_grid(
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_pearson)),
+  ggpubr::as_ggplot(ggpubr::get_legend(rotated_dotplot)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_lfc)),
+  ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target_network)),
+  nrow = 1,
+  align = "h", rel_widths = c(1.5, 1, 1, 1))
+
+combined_plot = cowplot::plot_grid(figures_without_legend, legends, rel_heights = c(10,5), nrow = 2, align = "hv")
+combined_plot
+
+
+###############################cellchat------------------
+library(CellChat)
+library(patchwork)
+options(stringsAsFactors = FALSE)
+
+
+#seurat对象分组----------------------------
+library(tidyverse)
+library(devtools)
+library(harmony)
+library(Seurat) 
+#对数据进行seurat标准流程
+setwd("F:\\暑假作业\\2022年暑假工作\\肺\\GSE127465（TISCH注释）\\")
+seurat<-readRDS("Seurat_cancer.rds")
+
+table(seurat$celltype)
+
+of_seurat<-readRDS("cancer_a后.rds")
+
+table(of_seurat$celltype)
+
+#将细胞按照癌胚样和旁观者来分组
+by_seurat<-seurat[,-which(colnames(seurat)%in%colnames(of_seurat))]
+table(by_seurat$celltype)
+
+of_seurat$aggregate<-"OF"
+of_seurat$celltype<-"OF-Malignant"
+by_seurat$aggregate<-"NOR"
+table(of_seurat$celltype)
+table(by_seurat$celltype)
+
+Seurat_cancer<-merge(x=of_seurat,y=by_seurat)
+table(Seurat_cancer$celltype)
+
+Seurat_cancer %>% Idents() %>% table()
+
+#查看信息
+Seurat_cancer@meta.data %>% head()
+Seurat_cancer
+
+Seurat_cancer[["percent.mt"]] <- PercentageFeatureSet(Seurat_cancer, pattern = "^MT-")
+VlnPlot(Seurat_cancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat_cancer<- subset(Seurat_cancer, subset =  nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt<20)
+
+Seurat_cancer<- NormalizeData(Seurat_cancer, normalization.method = "LogNormalize", scale.factor = 10000) 
+
+
+
+#第一部分：CellChat对象的数据输入、处理及初始化-------------
+# 加载数据
+# 对于基因表达数据矩阵，要求基因为行名，细胞为列名。需要将标准化数据作为 CellChat 分析的输入。
+# 如果用户提供count数据，我们提供一个函数normalizeData来计算文库大小，然后进行log转换。
+# 对于分组信息，需要使用带有行名的数据作为CellChat 的输入。
+
+#1.1接下来，我们可以构建cellchat对象了。
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\cellchat\\肺")
+Idents(Seurat_cancer)<-Seurat_cancer$celltype
+cellchat <- createCellChat(Seurat_cancer@assays$RNA@data, meta = Seurat_cancer@meta.data, group.by = "celltype")
+cellchat
+table(Seurat_cancer$aggregate)
+
+table(Seurat_cancer$celltype)
+summary(cellchat)
+str(cellchat)
+levels(cellchat@idents)
+
+groupSize <- as.numeric(table(cellchat@idents))  
+groupSize
+
+#1.2 设置配体-受体相互作用数据库
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+showDatabaseCategory(CellChatDB)
+
+#1.3 使用 CellChatDB 的子集进行细胞间通讯分析
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling", key = "annotation") # use Secreted Signaling
+# 在对象中设置使用的数据库
+cellchat@DB <- CellChatDB.use
+
+
+#1.4 预处理表达数据以进行细胞间通讯分析
+# 对信号基因的表达数据取子集以节省计算成本
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+future::plan("multisession", workers = 4) # do parallel
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+# 将基因表达数据投射到 PPI 上（可选：运行时，用户应在函数 computeCommunProb() 中设置 raw.use = FALSE 以使用投射数据）
+cellchat <- projectData(cellchat, PPI.human)
+
+#第二部分推断细胞间通信网络-------------------
+
+
+cellchat <- computeCommunProb(cellchat, type = "triMean")
+
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+
+#将推断的细胞通信网络提取为一个数据框
+df.net <- subsetCommunication(cellchat)
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\与成人聚类\\cellchat")
+write.csv(df.net, "net_lr.csv")
+
+
+#在信号通路水平上推断细胞间通讯
+#CellChat 通过汇总与每个信号通路相关的所有配体-受体相互作用的通信概率，计算信号通路水平上的通信概率。
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+df.netp <- subsetCommunication(cellchat, slot.name = "netP")
+write.csv(df.netp, "net_pathway.csv")
+
+
+#计算聚合的细胞间通信网络
+#我们可以通过计算连接数或汇总通信概率来计算聚合的细胞间通信网络。
+#用户还可以通过设置 sources.use 和 targets.use 来计算 cell groups 子集之间的聚合网络。
+cellchat <- aggregateNet(cellchat)
+#CellChat 还可以可视化聚合的细胞间通信网络。例如，使用 circle plot 显示任意两个 cell groups 之间的交互次数或总交互强度（权重）。
+
+ptm = Sys.time()
+
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+
+mat <- cellchat@net$weight
+par(mfrow = c(3,4), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), label.edge= F, title.name = rownames(mat)[i])
+}
+
+cellchat@netP$pathways 
+aa<-as.data.frame(cellchat@netP$pathways)
+write.table(aa,"pathway.txt",sep="\t",quote=F,row.names=F)
+pathways.show <- pathways.show.all
+levels(cellchat@idents)    # show all celltype
+# [1] "Naive CD4 T"  "Memory CD4 T" "CD14+ Mono"   "B"            "CD8 T"
+# [6] "FCGR3A+ Mono" "NK"           "DC"           "Platelet"
+vertex.receiver = c(1,2,3,4,5) # define a numeric vector 锛堟穻绯荤粏鑳烇級giving the index of the celltype as targets
+#par(mar=c(5.1,4.1,4.1,2.1))
+netVisual_aggregate(cellchat, signaling = pathways.show,  vertex.receiver = vertex.receiver,layout ="hierarchy" )
+# save as TIL/CXCL_hierarchy.pdf
+
+#第三部分可视化细胞间通信网络------------------
+
+#3.1 使用层次图、圆图或弦图可视化每个信号通路
+
+# Access all the signaling pathways showing significant communications灏嗘墍鏈変俊鍙烽€氳矾鎵惧嚭鏉?
+pathways.show.all <- cellchat@netP$pathways
+# check the order of cell identity to set suitable vertex.receiver
+levels(cellchat@idents)
+vertex.receiver = c(1,2,4) 
+dir.create("all_pathways_com_circle")
+
+for (i in 1:length(pathways.show.all)) {
+  # Visualize communication network associated with both signaling pathway and individual L-R pairs
+  netVisual(cellchat, signaling = pathways.show.all[i], out.format = c("pdf"),
+            vertex.receiver = vertex.receiver, layout = "hierarchy") 
+  # Compute and visualize the contribution of each ligand-receptor pair to the overall signaling pathway
+  gg <- netAnalysis_contribution(cellchat, signaling = pathways.show.all[i])
+  ggsave(filename=paste0(pathways.show.all[i], "_L-R_contribution.pdf"), 
+         plot=gg, width = 5, height = 2.5, units = 'in', dpi = 300)
+}
+
+levels(cellchat@idents)
+# show all the significant interactions (L-R pairs)
+
+p = netVisual_bubble(cellchat, sources.use = c(3), 
+                     targets.use = c(6), remove.isolate = FALSE)
+ggsave("Mye_Lymph_bubble.pdf", p, width = 8, height = 12) 
+# save as TIL/Mye_Lymph_bubble.pdf
+
+
+#计算每个配体-受体对对整个信号通路的贡献，并可视化由单个配体-受体对介导的细胞间通讯
+netAnalysis_contribution(cellchat, signaling = pathways.show)
+
+
+#3.2 可视化由多个配体-受体或信号通路介导的细胞间通讯
+#CellChat 还可以使用函数 netVisual_bubble（选项 A）和 netVisual_chord_gene（选项 B）显示由配体-受体对和信号通路介导的所有显著相互作用，以及用户从某些细胞组到其他细胞组提供的相互作用。
+#(A) Bubble plot
+#我们还可以使用 netVisual_bubble 显示从一些 cell groups 到其他 cell groups 的所有重要相互作用（L-R pairs）。
+# (1) show all the significant interactions (L-R pairs) from some cell groups (defined by 'sources.use') to other cell groups (defined by 'targets.use')
+netVisual_bubble(cellchat, sources.use = 4, targets.use = c(5:11), remove.isolate = FALSE)
+#> Comparing communications on a single object
+# (2) show all the significant interactions (L-R pairs) associated with certain signaling pathways
+netVisual_bubble(cellchat, sources.use = 4, targets.use = c(5:11), signaling = c("CCL","CXCL"), remove.isolate = FALSE)
+#> Comparing communications on a single object
+# (3) show all the significant interactions (L-R pairs) based on user's input (defined by `pairLR.use`)
+pairLR.use <- extractEnrichedLR(cellchat, signaling = c("CCL","CXCL","FGF"))
+netVisual_bubble(cellchat, sources.use = c(3,4), targets.use = c(5:8), pairLR.use = pairLR.use, remove.isolate = TRUE)
+#> Comparing communications on a single object
+# set the order of interacting cell pairs on x-axis
+# (4) Default: first sort cell pairs based on the appearance of sources in levels(object@idents), and then based on the appearance of targets in levels(object@idents)
+# (5) sort cell pairs based on the targets.use defined by users
+netVisual_bubble(cellchat, targets.use = c("LC","Inflam. DC","cDC2","CD40LG+ TC"), pairLR.use = pairLR.use, remove.isolate = TRUE, sort.by.target = T)
+# (6) sort cell pairs based on the sources.use defined by users
+netVisual_bubble(cellchat, sources.use = c("FBN1+ FIB","APOE+ FIB","Inflam. FIB"), pairLR.use = pairLR.use, remove.isolate = TRUE, sort.by.source = T)
+# (7) sort cell pairs based on the sources.use and then targets.use defined by users
+netVisual_bubble(cellchat, sources.use = c("FBN1+ FIB","APOE+ FIB","Inflam. FIB"), targets.use = c("LC","Inflam. DC","cDC2","CD40LG+ TC"), pairLR.use = pairLR.use, remove.isolate = TRUE, sort.by.source = T, sort.by.target = T)
+# (8) sort cell pairs based on the targets.use and then sources.use defined by users
+netVisual_bubble(cellchat, sources.use = c("FBN1+ FIB","APOE+ FIB","Inflam. FIB"), targets.use = c("LC","Inflam. DC","cDC2","CD40LG+ TC"), pairLR.use = pairLR.use, remove.isolate = TRUE, sort.by.source = T, sort.by.target = T, sort.by.source.priority = FALSE)
+
+#(B) Chord diagram
+#类似于 Bubble plot，CellChat 提供了一个函数 netVisual_chord_gene 来绘制 Chord diagram
+# show all the significant interactions (L-R pairs) from some cell groups (defined by 'sources.use') to other cell groups (defined by 'targets.use')
+# show all the interactions sending from Inflam.FIB
+netVisual_chord_gene(cellchat, sources.use = 4, targets.use = c(5:11), lab.cex = 0.5,legend.pos.y = 30)
+# show all the interactions received by Inflam.DC
+netVisual_chord_gene(cellchat, sources.use = c(1,2,3,4), targets.use = 8, legend.pos.x = 15)
+# show all the significant interactions (L-R pairs) associated with certain signaling pathways
+netVisual_chord_gene(cellchat, sources.use = c(1,2,3,4), targets.use = c(5:11), signaling = c("CCL","CXCL"),legend.pos.x = 8)
+# show all the significant signaling pathways from some cell groups (defined by 'sources.use') to other cell groups (defined by 'targets.use')
+netVisual_chord_gene(cellchat, sources.use = c(1,2,3,4), targets.use = c(5:11), slot.name = "netP", legend.pos.x = 10)
+
+#3.3 使用小提琴/点图绘制信号基因表达分布
+plotGeneExpression(cellchat, signaling = "CXCL", enriched.only = TRUE, type = "violin")
+
+print(as.numeric(execution.time, units = "secs"))
+
+plotGeneExpression(cellchat, signaling = "CXCL", enriched.only = FALSE)
+execution.time = Sys.time() - ptm
+
+#第四部分 细胞间通信网络系统分析-------------------------
+
+
+#(A) 计算和可视化网络中心性分数
+ptm = Sys.time()
+# Compute the network centrality scores
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+# Visualize the computed centrality scores using heatmap, allowing ready identification of major signaling roles of cell groups
+netAnalysis_signalingRole_network(cellchat, width = 8, height = 2.5, font.size = 10)
+
+#(B) 可视化 2D 空间中的主要发送者（sources）和接收者（targets）
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+gg1 <- netAnalysis_signalingRole_scatter(cellchat)
+gg1
+
+
+#保存 CellChat 对象
+saveRDS(cellchat, file = "cellchat.rds")
+#####################对于不同癌症，换输入数据即可
+
+
+#####################空转----------------
+#载入所需的R包；
+library(Seurat)#
+library(ggplot2)
+library(patchwork)#
+library(dplyr)
+library(hdf5r) #
+###############################读取空转数据################################
+data_dir<- "F:/"
+list.files(data_dir) #查看目录中的文件；
+file_name<- "melanoma_filtered_feature_bc_matrix.h5"
+brain<- Load10X_Spatial(data.dir = data_dir, filename = file_name,slice = "anterior1")
+
+brain@project.name <- "anterior1"
+Idents(brain) <- "anterior1"
+brain$orig.ident <- "anterior1"
+for (i in colnames((brain@images$anterior1@coordinates))) {
+  brain@images$anterior1@coordinates[[i]] <- as.integer(brain@images$anterior1@coordinates[[i]])
+}
+###############################数据的预处理################################
+##数据标准化、识别高变基因,20秒
+brain<- SCTransform(brain, assay = "Spatial", verbose = FALSE) #用SCTransform对数据进行标准化, 同时检测高变基因, 输出结果储存在 SCT assay中；#我们发现不同spot的mRNA分子数差异很大，特别是当组织中的细胞密度存在差异时，因此需要对数据进行标准化。由于细胞组织存在异质性，不同组织区域的细胞密度可能不同；因此如果采用常规单细胞转录组数据的LogNormalize标准化方法可能存在问题；这里Seurat作者推荐sctransform方法。
+##展示高变基因
+p5<- VariableFeaturePlot(brain,cols = c( "gray60", "red"))
+top10<- head(VariableFeatures(brain),10) 
+p6<- LabelPoints(plot = p5,points = top10, repel = TRUE,xnudge=0,ynudge=0) 
+p6#解释图纵轴：残差方差（residual variance），将观测值与模型预测值之间的差异的平方和除以自由度。即基因在每个细胞中的表达与表达均值的平方和除以减一后的细胞数目
+###############################降维、无监督聚类################################
+brain<- RunPCA(brain, assay = "SCT", verbose = FALSE)
+brain<- FindNeighbors(brain, reduction = "pca", dims = 1:30)
+brain<- FindClusters(brain, verbose = FALSE)
+brain<- RunUMAP(brain, reduction = "pca", dims = 1:30)
+#绘制UMAP分群图；#在切片图像上映射分群信息；
+p9<- DimPlot(brain, reduction = "umap", label = TRUE,label.size = 12)+theme(text = element_text(size=24))
+p10<- SpatialDimPlot(brain, label = TRUE, pt.size.factor = 3,label.size = 12,alpha = c(0.8, 1),image.alpha = 0)+ 
+  theme(text = element_text(size=24))
+options(repr.plot.width=16, repr.plot.height=8)#让图片展示变大
+SpatialDimPlot(brain,alpha =0)+NoLegend()+p9+p10
+
+
+#生存ZFP36L1.PRC1.PEG10.NFIL3.MAFF.HTATIP2.GPC3.FSTL3.FGFR1.CMPK1.CENPA.CDK6.C1S.C10orf90.AURKA.ANGPTL4.ADM
+
+#互作网络ATF5.DDIT3.TCF4.CERS2.CDH1.VEGFA.PLD1.BCL2L1.PDHA1.EZR.MAF.PCK2.HSPH1
+p<-SpatialFeaturePlot(brain, features = "ADM",
+                      pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+#+scale_fill_gradient(limits = c(-1, 1),low = "blue", high = "red")
+p
+
+#互作网络
+maker<-c("ATF5","DDIT3","TCF4","CERS2","CDH1","VEGFA","PLD1","BCL2L1","PDHA1","EZR","MAF","PCK2","HSPH1")
+maker<-as.data.frame(maker)
+
+#生存
+maker<-c("AURKA","CDK6","CENPA","HTATIP2","MAFF","PEG10","PRC1","C1S","ZFP36L1","ADM")
+maker<-as.data.frame(maker)
+
+library(ggplot2)
+setwd("F:/暑假作业/2022年暑假工作/所有癌症整合/空转/生存基因结果/")
+
+
+for (i in 1:10) {
+  
+  p<-SpatialFeaturePlot(brain, features = maker[i,1],
+                        pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+  
+  ggsave(paste0(maker[i,1],"_空转.pdf"), plot = p, width = 9, height = 6,units = "in")
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

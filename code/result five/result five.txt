@@ -1,0 +1,479 @@
+rm(list=ls())
+rm(a)
+library(Seurat) 
+library(dplyr)
+library(tidyverse)
+library(devtools)
+#数据预处理------------------------------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\")
+
+
+GSE123813_info<-read.delim("BCC_GSE123813_aPD1_CellMetainfo_table.tsv")#导入注释文件
+table(GSE123813_info$Celltype..malignancy.)
+GSE123813_info<-GSE123813_info[which(GSE123813_info$Celltype..malignancy.=="Malignant cells"),]#选择癌症细胞
+
+GSE123813_data<-read.table("bcc_scRNA_counts.txt",header = T,sep = "\t")#表达谱
+data<-GSE123813_data[,GSE123813_info$Cell]
+saveRDS(data,"data.rds")
+
+##############################################
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\")
+data<-readRDS("data.rds")
+
+Seurat<-CreateSeuratObject(data,project="cancer",min.cells = 3,min.features = 200)
+Seurat$come<-"GSE123813"
+Seurat$celltype<-GSE123813_info$Celltype..malignancy.
+Seurat$celltype1<-GSE123813_info$Celltype..major.lineage.
+Seurat$celltype2<-GSE123813_info$Celltype..minor.lineage.
+Seurat$response<-GSE123813_info$Response
+Seurat$treatment<-GSE123813_info$Treatment
+Seurat$timePoint<-GSE123813_info$TimePoint
+Seurat$patient<-GSE123813_info$Patient
+table(Seurat$response)
+
+##展示样本特性
+Seurat[["percent.mt"]] <- PercentageFeatureSet(Seurat, pattern = "^MT-")
+VlnPlot(Seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+##去除低质量细胞
+Seurat<- subset(Seurat, subset =  nFeature_RNA >200 & nFeature_RNA<6000 & percent.mt<10)
+Seurat<- NormalizeData(Seurat, normalization.method = "LogNormalize", scale.factor = 10000) 
+Seurat<- FindVariableFeatures(Seurat, selection.method = "vst", nfeatures = 2000)
+#对之前鉴定到的高可变基因进行标准化
+all.genes <- rownames(Seurat) 
+Seurat <- ScaleData(Seurat, features = all.genes) 
+Seurat <- ScaleData(Seurat,vars.to.regress = "percent.mt") 
+#RunPCA函数对标准化后的表达矩阵进行PCA降维处理.
+Seurat <- RunPCA(Seurat, features = Seurat@assays$RNA@var.features,npcs = 50)
+ElbowPlot(Seurat) 
+#UMAP算法将高维概率分布映射到低维空间的算法，从而做到降维的效果
+#准确界定数据集的维度---------
+
+#将要检测的seurat对象传递给sce
+sce=Seurat
+# Determine percent of variation associated with each PC   
+pct <- sce [["pca"]]@stdev / sum( sce [["pca"]]@stdev) * 100
+
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+# Determine which PC exhibits cumulative percent greater than 90% 
+# and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+co1
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+# last point where change of % of variation is more than 0.1%.
+co2
+# Minimum of the two calculation
+pcs <- min(co1, co2)
+pcs
+# Create a dataframe with values
+plot_df <- data.frame(pct = pct,   cumu = cumu,   rank = 1:length(pct))
+# Elbow plot to visualize
+library(ggplot2)
+ggplot(plot_df, aes(cumu, pct, label = rank, color = rank > pcs)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct[pct > 5]), color = "grey") +
+  theme_bw()
+rm(sce)# 清除对象
+ndim=19#根据上图确定
+#降维聚类-----------------------------------------
+Seurat<- FindNeighbors(Seurat,dims = 1:ndim) %>% FindClusters(resolution = c(0.5))
+Seurat <- RunUMAP(Seurat,reduction = "pca", dims = 1:ndim)
+table(Seurat$seurat_clusters)
+plot2 <- DimPlot(Seurat, reduction = "umap", group.by = "seurat_clusters", pt.size=0.5, label = TRUE,cols = c("#AEC7E8", "#67BF5C",
+                                                                                                              "#CDCC5D", "#FF9E4A",
+                                                                                                              "#ED665D", "#6DCCDA",
+                                                                                                              "#AD8BC9", "#FFBB78",
+                                                                                                              "#ED97CA", "#729ECE","#98DF8A", "#FF9896"))
+plot2
+
+
+
+#  识别marker ---------------------------------------------------------------
+###find markers for every cluster compared to all remaining cells, report only the positive（？） ones 
+Seurat.markers <- FindAllMarkers(Seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) 
+newSeurat.markers<-Seurat.markers[which(Seurat.markers$p_val_adj<=0.05),]
+
+cluster_marker<-Seurat.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+#识别簇（注释）-----------------------------------
+all_marker<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\6组织上调基因并集.txt")
+#all_marker<-read.table("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\差异基因\\com.txt")
+all_marker[,2]<-all_marker[,1]
+all_marker[,1]<-"development related cancer cells"
+colnames(all_marker)<-c("type","makers")#读取发育相关癌细胞marker
+
+# inter<-intersect(all_marker$makers,newSeurat.markers$gene)#P值小于0.05的基因与marker交集
+# inter<-as.data.frame(inter)
+
+int1<-intersect(all_marker$makers,cluster_marker$gene)#FC值前20的基因与marker交集
+
+top20mar<-cluster_marker[which(cluster_marker$gene%in%int1),]#FC值前20的交集基因表达
+table(top20mar$cluster)
+table(top20mar$gene)
+VlnPlot(Seurat, features = c("DMKN","FABP5","CENPF","NUSAP1","TOP2A","MKI67"))#可视化每个簇中这个基因的表达高低，小提琴图
+FeaturePlot(Seurat, features = c("DMKN","FABP5","CENPF","NUSAP1","TOP2A","MKI67"))#细胞降维图
+#fdr0.05mar<-newSeurat.markers[which(newSeurat.markers$gene%in%inter$inter),]#P值小于0.05的交集基因表达
+stem_cell<-Seurat[,which(Seurat$seurat_clusters=="9"|Seurat$seurat_clusters=="0"|Seurat$seurat_clusters=="8")]
+
+# saveRDS(stem_cell,"stem_cell.rds")
+# saveRDS(Seurat,"Seurat.rds")
+
+Seurat<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\Seurat.rds")
+#查看8簇中预前预后细胞比例
+
+stem_cell<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\stem_cell.rds")
+
+table(stem_cell$treatment)
+table(Seurat$treatment)
+
+table(stem_cell$response)
+table(Seurat$response)
+
+table(stem_cell$timePoint)
+table(Seurat$timePoint)
+
+
+
+
+#进行拟时序分析和干性打分，判断发育相关簇的细胞是否符合期望----------------------
+# CytoTRACE ----------------------------------------------------------------------
+#包########################################################cytoTRANCE
+
+
+#定位python路径
+library(reticulate)#使R能读懂python环境
+Sys.setenv(RETICULATE_PYTHON="D:\\Program Files\\Python311\\python.exe")
+use_python("D:\\Program Files\\Python311\\python.exe") 
+py_available()
+use_python("D:\\Program Files\\Python311\\python.exe")
+py_config()
+py_available()
+
+import("numpy")
+import("sklearn")
+import("scipy")
+import("annoy")
+import("scanoramaCT")
+#导入包
+library(CytoTRACE)
+library(Seurat) 
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\")
+Seurat<-readRDS("Seurat.rds")
+#下面是直接在软件上运行，但他会自动保持结果的可视化，不好看.
+count<- Seurat@assays$RNA@counts
+
+Seurat@meta.data$cluster_new <- paste("cluster",Seurat@meta.data$seurat_clusters,sep="_")
+
+count<-as.data.frame(count)
+clusters<-Seurat$cluster_new
+table(Seurat$seurat_clusters)
+
+
+results <- CytoTRACE(count)#运行 CytoTRACE
+
+plotCytoTRACE(results, phenotype = clusters)#可视化 CytoTRACE 结果
+
+saveRDS(results,"results.rds")
+
+#箱式图
+library(ggplot2)
+
+CytoTRACE_plot_table<-read.table("CytoTRACE_plot_table.txt")
+CytoTRACE_plot_table$cellname<-rownames(CytoTRACE_plot_table)
+stem_cell<-Seurat[,which(Seurat$seurat_clusters=="9"|Seurat$seurat_clusters=="90"|Seurat$seurat_clusters=="8")]
+two_cell<-as.data.frame(colnames(stem_cell))
+
+CytoTRACE_plot_table$change <- as.factor(ifelse(CytoTRACE_plot_table$cellname%in%two_cell$`colnames(stem_cell)`,"Y","N"))
+table(CytoTRACE_plot_table$CytoTRACE)
+
+
+ggplot(data = CytoTRACE_plot_table,aes(x = change, y = CytoTRACE)) + 
+  geom_boxplot(aes(fill = change))+ scale_fill_manual(values = c("#E69F00","#56B4E9"))+
+  theme_classic()+
+  theme(legend.position="right")+
+  labs(title="Plot of length per dose",x="relevance", y = "Length")
+
+#monocle---------------------------------
+
+library(monocle)
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\")
+Seudata<-readRDS("Seurat.rds")
+
+stem_cell<-Seudata[,which(Seudata$seurat_clusters=="9"|Seudata$seurat_clusters=="0"|Seudata$seurat_clusters=="8")]
+stem_cell$stem<-"Y"
+nstem_cell<-Seudata[,-which(Seudata$seurat_clusters=="9"|Seudata$seurat_clusters=="0"|Seudata$seurat_clusters=="8")]
+nstem_cell$stem<-"N"
+
+Seu<-merge(stem_cell,nstem_cell)
+table(Seu$stem)
+expr_matrix <- as(as.matrix(Seu@assays$RNA@counts), "sparseMatrix")
+p_data <- Seu@meta.data
+f_data <- data.frame(gene_short_name = row.names(Seu) ,row.names = row.names(Seu))
+#构建CDS对象
+pd <- new( "AnnotatedDataFrame", data = p_data)
+fd <- new( "AnnotatedDataFrame", data = f_data)
+#将p_data和f_data从data.frame转换AnnotatedDataFrame对象。
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+#开始运行
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+cds <- detectGenes(cds,min_expr = 0.1)
+print(head(fData(cds)))#此时有13714个基因
+expressed_genes <- row.names(subset(fData(cds),num_cells_expressed >= 10))#过滤掉在小于10个细胞中表达的基因,还剩11095个基因。
+cds$celltype
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~seurat_clusters",cores=1)
+head(diff)
+deg <- subset(diff,qval < 0.01)
+deg <- deg[ order(deg$qval,decreasing=F),]
+head(deg)
+ordergene <- rownames(deg)
+cds <- setOrderingFilter(cds, ordergene)
+plot_ordering_genes(cds)
+ordergene <- row.names(deg)[order(deg$qval)][1:2000]
+cds <- reduceDimension(cds, max_components = 2,method = "DDRTree")
+
+cds <- orderCells(cds)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE)
+plot_cell_trajectory(cds,color_by = "State",size=1,show_backbone=TRUE)
+plot_cell_trajectory(cds,color_by = "seurat_clusters")
+cell_colors<- c("#F9D23C", "#ED97CA")
+plot_cell_trajectory(cds,color_by = "stem",size=1,show_backbone=TRUE)+ scale_color_manual(values=cell_colors)
+
+
+######治疗前后细胞浸润比例-------------------
+rm(list=ls())
+rm(a)
+library(Seurat) 
+library(dplyr)
+library(tidyverse)
+library(devtools)
+#数据预处理------------------------------------------------
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\")
+
+
+GSE123813_info<-read.delim("BCC_GSE123813_aPD1_CellMetainfo_table.tsv")#导入注释文件
+table(GSE123813_info$Celltype..malignancy.)
+
+
+# Treatment_aPD1<-GSE123813_info[which(GSE123813_info$Treatment=="aPD1"),]
+# Treatment_None<-GSE123813_info[which(GSE123813_info$Treatment=="None"),]
+# 
+# table(Treatment_aPD1$Patient)
+# table(Treatment_None$Patient)
+
+setwd("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\")
+stem_cell<-readRDS("stem_cell.rds")
+Seurat<-readRDS("Seurat.rds")
+stem<-as.data.frame(colnames(stem_cell))
+#su006---------------------------------------------
+
+su006<-GSE123813_info[which(GSE123813_info$Patient=="su006"),]
+su006_aPD1<-su006[which(su006$Treatment=="aPD1"),]
+su006_None<-su006[which(su006$Treatment=="None"),]
+
+table(su006_aPD1$Celltype..malignancy.)
+table(su006_None$Celltype..malignancy.)
+
+su006<-rbind(su006_None,su006_aPD1)
+su006$n<-"1"
+su006<-su006[,c(1,4,19,20)]
+colnames(su006)<-c("cell","celltype","Treatment","n")
+
+
+
+su006$celltype<-gsub(" ","_",su006$celltype)
+su006 <- su006 %>% group_by(Treatment,celltype) %>% summarise(n=n())
+
+#给每个细胞类型附上比例
+#su006[which(su006$celltype=="Developmental_related_cancer_cells" & su006$Treatment=="aPD1"),4]<-"0.0006"
+su006[which(su006$celltype=="Immune_cells" & su006$Treatment=="aPD1"),4]<-"0.8320"
+su006[which(su006$celltype=="Malignant_cells" & su006$Treatment=="aPD1"),4]<-"0.0793"
+su006[which(su006$celltype=="Stromal_cells" & su006$Treatment=="aPD1"),4]<-"0.0887"
+
+
+#su006[which(su006$celltype=="Developmental_related_cancer_cells" & su006$Treatment=="None"),4]<-"0.0248"
+su006[which(su006$celltype=="Immune_cells" & su006$Treatment=="None"),4]<-"0.6927"
+su006[which(su006$celltype=="Malignant_cells" & su006$Treatment=="None"),4]<-"0.2703"
+su006[which(su006$celltype=="Stromal_cells" & su006$Treatment=="None"),4]<-"0.0370"
+
+
+colnames(su006)<-c("Treatment","celltype","n","perccent")
+su006$perccent<-as.numeric(su006$perccent)
+
+
+
+su006$Treatment <- factor(su006$Treatment,levels = c("None","aPD1"))#让用药前排在前面
+
+
+
+
+
+library(tidyverse)
+library(ggsci)
+library(magrittr)
+library(reshape)
+library(RColorBrewer)
+library(ggalluvial)
+
+
+su006$group<-"su006"
+ggplot(data = su006,
+       aes(x = Treatment, y = perccent, fill = reorder(celltype,-perccent), 
+           stratum = reorder(celltype,-perccent),
+           alluvium = reorder(celltype,-perccent))) +  # 创建绘图对象，设置x轴、y轴、alluvium和stratum变量为name、value、Genus
+  geom_alluvium(aes(fill = celltype), alpha = .5, width = 0.6) +  # 添加alluvium图层，设置填充颜色为Genus，透明度为0.5，宽度为0.6
+  geom_stratum(aes(fill = celltype), width = 0.6) +  # 添加stratum图层，设置填充颜色为Genus，宽度为0.6
+  facet_grid(. ~ group, scales = "free", space = "free_x") +  # 根据group变量进行网格分面，设置自由的x轴和y轴刻度，自由的x轴间距
+  labs(x = NULL, y = NULL) +  # 设置x轴标签和y轴标签为空
+  scale_fill_simpsons() +  # 设置填充颜色的比例尺为Simpsons风格
+  scale_y_continuous(expand = c(0, 0)) +  # 设置y轴刻度范围的扩展为0
+  scale_x_discrete(expand = c(0, 0)) +  # 设置x轴刻度范围的扩展为0
+  scale_y_continuous(labels = scales::percent)+
+  scale_fill_manual(values= c("#AEC7E8", "#67BF5C", "#CDCC5D", "#FF9E4A"))+
+  ylab("Percentage")+
+  theme(
+    axis.line.x = element_line(color = "black"),  # 设置x轴线的颜色为黑色
+    axis.line.y = element_line(color = "black"),  # 设置y轴线的颜色为黑色
+    axis.text.x = element_text(size = 8,face = "plain",angle = 0,
+                               vjust = 0.5,hjust = 0.5,color = "black"),  # 设置x轴文本的大小、样式、角度、垂直和水平对齐方式，颜色为黑色
+    axis.text.y = element_text(size = 8, face = "plain", color = "black"),  # 设置y轴文本的大小、样式，颜色为黑色
+    panel.border = element_blank(),  # 设置面板边框为空白
+    plot.background = element_blank(),  # 设置绘图区背景为空白
+    axis.title.x = element_text(margin = margin(t = 10), size = 11, color = "black"),  # 设置x轴标题的边距、大小，颜色为黑色
+    axis.title.y = element_text(margin = margin(r = 10), size = 11, color = "black"),  # 设置y轴标题的边距、大小，颜色为黑色
+    panel.grid.major.x = element_blank(),  # 设置x轴主要网格线为空白
+    panel.grid.minor.x = element_blank(),  # 设置x轴次要网格线为空白
+    panel.grid.minor.y = element_blank(),  # 设置y轴次要网格线为空白
+    panel.grid.major.y = element_blank(),  # 设置y轴主要网格线为空白
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), units = "cm"),  # 设置绘图区边距为0.5厘米
+    legend.text = element_text(size = 20, color = "black"),  # 设置图例文本的大小和颜色
+    legend.key = element_blank(),  # 设置图例键为空白
+    legend.title = element_blank(),  # 设置图例标题为空白
+    panel.background = element_rect(fill = "white"),  # 设置面板背景为白色
+    legend.background = element_rect(color = "black",fill = "transparent",
+                                     size = 2,linetype = "blank"),  # 设置图例背景的边框颜色为黑色，填充为透明，边框大小为2，线型为空白
+    panel.spacing.x = unit(0.1, "cm"),  # 设置面板x轴间距为0.1厘米
+    strip.background = element_blank(),  # 设置分面标签背景为空白
+    strip.text = element_text(color = "black", face = "bold"),  # 设置分面标签文本的颜色为黑色，样式为粗体
+    legend.key.height = unit(0.5, "cm"),  # 设置图例键的高度为0.5厘米
+    legend.key.width = unit(0.5, "cm"),  # 设置图例键的宽度为0.5厘米
+    legend.spacing.x = unit(0.1, "cm"),  # 设置图例水平间距为0.1厘米
+    legend.box.background = element_blank()  # 设置图例框背景为空白
+  )+
+  labs(x = "su006",y= "Percentage")
+
+#################5-FU-------------------------
+a<-readRDS("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\用来测试基因的单细胞数据\\基底细胞癌\\GSE123813\\Seurat.rds")
+table(a$seurat_clusters)
+
+
+
+obs<-read.csv("F:\\暑假作业\\2022年暑假工作\\所有癌症整合\\细胞药物敏感预测\\徐涌乐-obs-5弗.csv")
+obs<-obs[,c(1,14,16)]
+
+sample<-as.data.frame(a$seurat_clusters)
+sample$X<-rownames(sample)
+aa<-which(sample$X%in%obs$X)
+sample<-sample[aa,]
+sample<-merge(sample,obs,by="X")
+
+sample_stem<-sample[which(sample$`a$seurat_clusters`=="9"|sample$`a$seurat_clusters`=="8"|sample$`a$seurat_clusters`=="0"),]
+table(sample_stem$sens_label_pret)
+
+sample_other<-sample[-which(sample$`a$seurat_clusters`=="9"|sample$`a$seurat_clusters`=="8"|sample$`a$seurat_clusters`=="0"),]
+table(sample_other$sens_label_pret)
+
+
+my_matrix<-matrix(4,4,4)
+my_matrix<-as.data.frame(my_matrix)
+
+my_matrix[1,1]<-"DRCC"
+my_matrix[2,1]<-"DRCC"
+my_matrix[3,1]<-"NDRCC"
+my_matrix[4,1]<-"NDRCC"
+
+my_matrix[1,2]<-"Resistive"
+my_matrix[2,2]<-"Sensitive"
+my_matrix[3,2]<-"Resistive"
+my_matrix[4,2]<-"Sensitive"
+
+table(sample_stem$sens_label)
+table(sample_other$sens_label)
+my_matrix[1,3]<-260
+my_matrix[2,3]<-30
+my_matrix[3,3]<-600
+my_matrix[4,3]<-1176
+#明天将百分比算出来
+my_matrix[1,4]<-0.8966
+my_matrix[2,4]<-0.1034
+my_matrix[3,4]<-0.3378
+my_matrix[4,4]<-0.6622
+
+colnames(my_matrix)<-c("Treatment","celltype","n","perccent")
+my_matrix$perccent<-as.numeric(my_matrix$perccent)
+
+
+
+#冲击图================
+library(tidyverse)
+library(ggsci)
+library(magrittr)
+library(reshape)
+library(RColorBrewer)
+library(ggalluvial)
+my_matrix$group<-"my_matrix"
+su<-my_matrix
+su$Treatment <- factor(su$Treatment,levels = c("NDRCC","DRCC"))#让用药前排在前面
+ggplot(data = su,
+       aes(x = Treatment, y = perccent, fill = reorder(celltype,-perccent), 
+           stratum = reorder(celltype,-perccent),
+           alluvium = reorder(celltype,-perccent))) +  # 创建绘图对象，设置x轴、y轴、alluvium和stratum变量为name、value、Genus
+  geom_alluvium(aes(fill = celltype), alpha = .5, width = 0.6) +  # 添加alluvium图层，设置填充颜色为Genus，透明度为0.5，宽度为0.6
+  geom_stratum(aes(fill = celltype), width = 0.6) +  # 添加stratum图层，设置填充颜色为Genus，宽度为0.6
+  facet_grid(. ~ group, scales = "free", space = "free_x") +  # 根据group变量进行网格分面，设置自由的x轴和y轴刻度，自由的x轴间距
+  labs(x = NULL, y = NULL) +  # 设置x轴标签和y轴标签为空
+  scale_fill_simpsons() +  # 设置填充颜色的比例尺为Simpsons风格
+  scale_y_continuous(expand = c(0, 0)) +  # 设置y轴刻度范围的扩展为0
+  scale_x_discrete(expand = c(0, 0)) +  # 设置x轴刻度范围的扩展为0
+  scale_y_continuous(labels = scales::percent)+
+  scale_fill_manual(values= c("#AEC7E8", "#67BF5C", "#CDCC5D", "#FF9E4A"))+
+  ylab("Percentage")+
+  theme(
+    axis.line.x = element_line(color = "black"),  # 设置x轴线的颜色为黑色
+    axis.line.y = element_line(color = "black"),  # 设置y轴线的颜色为黑色
+    axis.text.x = element_text(size = 8,face = "plain",angle = 0,
+                               vjust = 0.5,hjust = 0.5,color = "black"),  # 设置x轴文本的大小、样式、角度、垂直和水平对齐方式，颜色为黑色
+    axis.text.y = element_text(size = 8, face = "plain", color = "black"),  # 设置y轴文本的大小、样式，颜色为黑色
+    panel.border = element_blank(),  # 设置面板边框为空白
+    plot.background = element_blank(),  # 设置绘图区背景为空白
+    axis.title.x = element_text(margin = margin(t = 10), size = 11, color = "black"),  # 设置x轴标题的边距、大小，颜色为黑色
+    axis.title.y = element_text(margin = margin(r = 10), size = 11, color = "black"),  # 设置y轴标题的边距、大小，颜色为黑色
+    panel.grid.major.x = element_blank(),  # 设置x轴主要网格线为空白
+    panel.grid.minor.x = element_blank(),  # 设置x轴次要网格线为空白
+    panel.grid.minor.y = element_blank(),  # 设置y轴次要网格线为空白
+    panel.grid.major.y = element_blank(),  # 设置y轴主要网格线为空白
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), units = "cm"),  # 设置绘图区边距为0.5厘米
+    legend.text = element_text(size = 20, color = "black"),  # 设置图例文本的大小和颜色
+    legend.key = element_blank(),  # 设置图例键为空白
+    legend.title = element_blank(),  # 设置图例标题为空白
+    panel.background = element_rect(fill = "white"),  # 设置面板背景为白色
+    legend.background = element_rect(color = "black",fill = "transparent",
+                                     size = 2,linetype = "blank"),  # 设置图例背景的边框颜色为黑色，填充为透明，边框大小为2，线型为空白
+    panel.spacing.x = unit(0.1, "cm"),  # 设置面板x轴间距为0.1厘米
+    strip.background = element_blank(),  # 设置分面标签背景为空白
+    strip.text = element_text(color = "black", face = "bold"),  # 设置分面标签文本的颜色为黑色，样式为粗体
+    legend.key.height = unit(0.5, "cm"),  # 设置图例键的高度为0.5厘米
+    legend.key.width = unit(0.5, "cm"),  # 设置图例键的宽度为0.5厘米
+    legend.spacing.x = unit(0.1, "cm"),  # 设置图例水平间距为0.1厘米
+    legend.box.background = element_blank()  # 设置图例框背景为空白
+  )+
+  labs(x = "su",y= "Percentage")
+
+
