@@ -1,0 +1,1329 @@
+# CNV Analysis for Single-Cell Methylation Data
+suppressMessages({
+  library(DNAcopy)
+  library(tidyverse)
+  library(pheatmap)
+  library(reshape2)
+})
+
+# === 目录设置 ===
+cov_dir <- "/bioccNSW/xyl/bam/coverage"
+output_dir <- "/bioccNSW/xyl/bam/r_output"
+group_file <- "/bioccNSW/xyl/bam/complete_group_info.txt"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# === 染色体长度 (hg38) ===
+chr_lengths <- c(
+  '1'=248956422, '2'=242193529, '3'=198295559, '4'=190214555, '5'=181538259,
+  '6'=170805979, '7'=159345973, '8'=145138636, '9'=138394717, '10'=133797422,
+  '11'=135086622, '12'=133275309, '13'=114364328, '14'=107043718, '15'=101991189,
+  '16'=90338345, '17'=83257441, '18'=80373285, '19'=58617616, '20'=64444167,
+  '21'=46709983, '22'=50818468, 'X'=156040895, 'Y'=57227415
+)
+
+# 计算染色体累积位置
+cum_lengths <- cumsum(c(0, chr_lengths[-length(chr_lengths)]))
+names(cum_lengths) <- names(chr_lengths)
+
+# === 读取分组信息 ===
+group_df <- read.table(group_file, header = TRUE, stringsAsFactors = FALSE)
+colnames(group_df) <- c("Sample", "Group")
+group_df$Sample <- as.character(group_df$Sample)
+
+# 打印分组信息摘要
+cat("📊 分组信息摘要:\n")
+print(table(group_df$Group))
+
+# === 读取所有覆盖度文件 - 增强的错误处理 ===
+signal_list <- list()
+all_read_counts <- list()
+bin_info <- NULL
+
+files <- list.files(cov_dir, pattern = "_coverage.txt$", full.names = TRUE)
+cat("📁 找到", length(files), "个覆盖度文件\n")
+
+# 创建日志文件记录问题
+log_file <- file.path(output_dir, "file_processing_log.txt")
+sink(log_file, append = FALSE)
+cat("=== 文件处理日志 ===\n")
+cat("开始时间:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n\n")
+sink()
+
+for (file in files) {
+  sample_name <- gsub("_coverage.txt", "", basename(file))
+  cat("\n🔄 处理样本:", sample_name, "\n")
+  
+  # 记录到日志
+  sink(log_file, append = TRUE)
+  cat("\n处理文件:", file, "\n")
+  cat("样本:", sample_name, "\n")
+  sink()
+  
+  # 1. 检查文件是否存在且非空
+  if (!file.exists(file)) {
+    msg <- paste("❌ 文件不存在:", file)
+    cat(msg, "\n")
+    sink(log_file, append = TRUE)
+    cat(msg, "\n")
+    sink()
+    next
+  }
+  
+  if (file.size(file) == 0) {
+    msg <- paste("❌ 文件为空:", file)
+    cat(msg, "\n")
+    sink(log_file, append = TRUE)
+    cat(msg, "\n")
+    sink()
+    next
+  }
+  
+  # 2. 预扫描文件以检测问题行
+  tryCatch({
+    # 尝试读取前200行
+    test_df <- read.table(file, header = FALSE, nrows = 200)
+    # 如果成功，继续处理
+    df <- read.table(file, header = FALSE, stringsAsFactors = FALSE)
+    
+    # 检查列数
+    if (ncol(df) < 7) {
+      msg <- paste("⚠️  文件列数不足:", ncol(df), "期望7列")
+      cat(msg, "\n")
+      sink(log_file, append = TRUE)
+      cat(msg, "\n")
+      
+      # 尝试添加缺失列
+      missing_cols <- 7 - ncol(df)
+      for (i in 1:missing_cols) {
+        df[[paste0("V", ncol(df) + 1)]] <- NA
+      }
+      cat("已添加", missing_cols, "个NA列\n")
+    }
+    
+    colnames(df)[1:7] <- c("chr", "start", "end", "read_count", "covered_bases", "bin_size", "fraction")
+    
+    # 保存bin信息
+    if (is.null(bin_info)) {
+      bin_info <- df[, c("chr", "start", "end")]
+      bin_info$global_pos <- bin_info$start + cum_lengths[as.character(bin_info$chr)]
+    }
+    
+    # 保存read_count
+    all_read_counts[[sample_name]] <- df$read_count
+    
+    sink(log_file, append = TRUE)
+    cat("成功读取，行数:", nrow(df), "列数:", ncol(df), "\n")
+    sink()
+    
+  }, error = function(e) {
+    # 详细诊断错误
+    error_msg <- paste("❌ 读取错误:", e$message)
+    cat(error_msg, "\n")
+    
+    sink(log_file, append = TRUE)
+    cat(error_msg, "\n")
+    
+    # 尝试定位问题行
+    try({
+      lines <- readLines(file)
+      total_lines <- length(lines)
+      
+      # 检查120行是否存在
+      if (total_lines < 120) {
+        line_count_msg <- paste("文件只有", total_lines, "行，但要求读取第120行")
+        cat(line_count_msg, "\n")
+        sink(log_file, append = TRUE)
+        cat(line_count_msg, "\n")
+      } else {
+        # 检查问题行内容
+        problem_line <- lines[120]
+        line_msg <- paste("第120行内容:", problem_line)
+        cat(line_msg, "\n")
+        sink(log_file, append = TRUE)
+        cat(line_msg, "\n")
+        
+        # 检查问题行字段数
+        fields <- unlist(strsplit(problem_line, "\t"))
+        field_count_msg <- paste("第120行字段数:", length(fields))
+        cat(field_count_msg, "\n")
+        sink(log_file, append = TRUE)
+        cat(field_count_msg, "\n")
+      }
+    }, silent = TRUE)
+    
+    sink(log_file, append = TRUE)
+    cat("跳过此文件\n")
+    sink()
+    
+    # 创建问题文件副本以便检查
+    problem_file <- file.path(output_dir, paste0("PROBLEM_", basename(file)))
+    file.copy(file, problem_file)
+    cat("已创建问题文件副本:", problem_file, "\n")
+    
+    sink(log_file, append = TRUE)
+    cat("问题文件副本保存至:", problem_file, "\n\n")
+    sink()
+  })
+}
+
+# 如果没有成功读取任何文件，停止执行
+if (length(all_read_counts) == 0) {
+  stop("❌ 没有成功读取任何覆盖度文件，请检查日志: ", log_file)
+}
+
+# === 构建read count矩阵 ===
+read_count_matrix <- do.call(cbind, all_read_counts)
+rownames(read_count_matrix) <- paste0(bin_info$chr, ":", bin_info$start)
+
+# === 计算正常组参考 ===
+normal_samples <- group_df$Sample[group_df$Group == "Normal"]
+if (length(normal_samples) == 0) {
+  stop("❌ 没有找到正常组样本，请检查分组文件")
+}
+
+cat("🔬 使用", length(normal_samples), "个正常样本作为参考\n")
+normal_matrix <- read_count_matrix[, normal_samples, drop = FALSE]
+
+# 计算参考中位数
+ref_median <- apply(normal_matrix, 1, median, na.rm = TRUE)
+
+# === 标准化并计算log2 coverage ===
+for (sample_name in colnames(read_count_matrix)) {
+  cat("🔄 处理样本:", sample_name, "\n")
+  
+  read_count <- read_count_matrix[, sample_name]
+  valid_idx <- !is.na(read_count) & !is.na(ref_median) & read_count > 0 & ref_median > 0
+  log2cov <- rep(NA, length(read_count))
+  log2cov[valid_idx] <- log2(read_count[valid_idx] / ref_median[valid_idx])
+  
+  signal_list[[sample_name]] <- log2cov
+}
+
+# === 构建log2 coverage矩阵 ===
+cnv_matrix <- do.call(cbind, signal_list)
+rownames(cnv_matrix) <- rownames(read_count_matrix)
+
+# === 对齐样本顺序和分组信息 ===
+valid_samples <- intersect(colnames(cnv_matrix), group_df$Sample)
+if (length(valid_samples) == 0) {
+  stop("❌ 没有匹配的样本，请检查分组文件和覆盖度文件中的样本名称")
+}
+
+cnv_matrix <- cnv_matrix[, valid_samples, drop = FALSE]
+group_df <- group_df %>% filter(Sample %in% valid_samples)
+group_df <- group_df[match(colnames(cnv_matrix), group_df$Sample), ]
+
+cat("✅ 有效样本数量:", ncol(cnv_matrix), "\n")
+
+# === 按染色体顺序排序 ===
+chr_order <- names(chr_lengths)
+bin_chr <- gsub(":.*", "", rownames(cnv_matrix))
+bin_start <- as.numeric(gsub(".*:", "", rownames(cnv_matrix)))
+bin_order <- order(factor(bin_chr, levels = chr_order), bin_start)
+cnv_matrix <- cnv_matrix[bin_order, , drop = FALSE]
+bin_info <- bin_info[bin_order, ]
+
+# === 分段分析 ===
+cnv_score_list <- list()
+for (sample_name in colnames(cnv_matrix)) {
+  cat("🔍 分段分析:", sample_name, "\n")
+  
+  log2cov <- cnv_matrix[, sample_name]
+  valid_idx <- !is.na(log2cov)
+  
+  if (sum(valid_idx) < 100) {
+    cat("⚠️  跳过", sample_name, "- 有效bin太少:", sum(valid_idx), "\n")
+    next
+  }
+  
+  # DNAcopy分段
+  CNAobj <- CNA(
+    genomdat = log2cov[valid_idx],
+    chrom = bin_chr[valid_idx],
+    maploc = bin_start[valid_idx],
+    data.type = "logratio"
+  )
+  
+  smoothCNA <- smooth.CNA(CNAobj)
+  seg <- segment(smoothCNA, alpha = 0.01, nperm = 10000, verbose = 0)
+  
+  # 保存分段结果
+  seg_file <- file.path(output_dir, paste0(sample_name, "_segments.txt"))
+  write.table(seg$output, seg_file, sep = "\t", quote = FALSE, row.names = FALSE)
+  
+  # 计算CNV Score
+  cnv_score <- mean(abs(seg$output$seg.mean), na.rm = TRUE)
+  cnv_score_list[[sample_name]] <- cnv_score
+  
+  score_file <- file.path(output_dir, paste0(sample_name, "_CNVscore.txt"))
+  write.table(
+    data.frame(Sample = sample_name, CNV_Score = cnv_score),
+    score_file, sep = "\t", quote = FALSE, row.names = FALSE
+  )
+}
+
+# === 按染色体绘制热图 ===
+# 排除chrX和chrY
+valid_chr <- setdiff(names(chr_lengths), c("X", "Y"))
+
+for (chrom in valid_chr) {
+  cat("📊 绘制染色体", chrom, "热图\n")
+  chr_idx <- bin_info$chr == chrom
+
+  # 每染色体最多显示1000个bin
+  n_bins <- sum(chr_idx)
+  if (n_bins > 1000) {
+    display_bins <- seq(1, n_bins, length.out = 1000)
+    chr_matrix <- cnv_matrix[chr_idx, , drop = FALSE][display_bins, ]
+  } else {
+    chr_matrix <- cnv_matrix[chr_idx, , drop = FALSE]
+  }
+
+  # 样本按组排序
+  sample_order <- group_df %>% arrange(Group) %>% pull(Sample)
+  chr_matrix <- chr_matrix[, sample_order, drop = FALSE]
+
+  # 创建注释数据
+  annotation_df <- data.frame(
+    Group = group_df$Group,
+    row.names = group_df$Sample
+  )
+
+  # 绘制热图（不显示列名）
+  pdf(file.path(output_dir, paste0("CNV_heatmap_chr", chrom, ".pdf")), width = 12, height = 9)
+  pheatmap(chr_matrix,
+           show_rownames = FALSE,
+           show_colnames = FALSE,
+           cluster_cols = FALSE,
+           cluster_rows = FALSE,
+           annotation_col = annotation_df,
+           main = paste("Chr", chrom, "CNV Profile"),
+           fontsize_col = 6,
+           cutree_cols = 2)
+  dev.off()
+}
+# === 平均轨迹图 ===
+avg_matrix <- cnv_matrix
+avg_matrix[is.na(avg_matrix)] <- 0
+
+avg_df <- data.frame(
+  Bin = rownames(avg_matrix),
+  GlobalPos = bin_info$global_pos,
+  Chr = bin_info$chr
+)
+
+for (grp in unique(group_df$Group)) {
+  samples <- group_df$Sample[group_df$Group == grp]
+  if (length(samples) > 0) {
+    avg_df[[grp]] <- rowMeans(avg_matrix[, samples, drop = FALSE], na.rm = TRUE)
+  }
+}
+
+avg_long <- avg_df %>%
+  pivot_longer(cols = -c(Bin, GlobalPos, Chr), 
+               names_to = "Group", 
+               values_to = "log2cov")
+
+chr_boundaries <- cumsum(chr_lengths)
+chr_centers <- cum_lengths + chr_lengths / 2
+
+gg <- ggplot(avg_long, aes(x = GlobalPos, y = log2cov, color = Group)) +
+  geom_line(size = 0.5, alpha = 0.8) +
+  geom_vline(xintercept = chr_boundaries, linetype = "dashed", alpha = 0.5) +
+  scale_x_continuous(
+    name = "Genomic Position",
+    breaks = chr_centers,
+    labels = names(chr_lengths)
+  ) +
+  labs(title = "Average CNV Trajectories", 
+       y = "log2(Normalized read count)") +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "top",
+    axis.text.x = element_text(angle = 90, vjust = 0.5)
+  )
+
+ggsave(file.path(output_dir, "CNV_trajectory.pdf"), gg, width = 14, height = 6)
+
+# === 输出CNV score汇总 ===
+cnv_score_df <- data.frame(
+  Sample = names(cnv_score_list),
+  CNV_Score = unlist(cnv_score_list)
+) %>%
+  left_join(group_df, by = "Sample") %>%
+  arrange(Group, desc(CNV_Score))
+
+write.table(cnv_score_df, 
+            file.path(output_dir, "CNV_scores_summary.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
+
+# === 保存工作空间 ===
+save.image(file.path(output_dir, "cnv_analysis.RData"))
+
+# === 下面开始 pre_tumor vs non_pre_tumor CNV 差异分析 ===
+library(dplyr)
+library(ggplot2)
+
+pt_samples <- group_df$Sample[group_df$Group == "pre_tumor"]
+npt_samples <- group_df$Sample[group_df$Group == "non_pre_tumor"]
+
+# 检查样本数是否足够
+cat("✅ pre_tumor 样本数:", length(pt_samples), "\n")
+cat("✅ non_pre_tumor 样本数:", length(npt_samples), "\n")
+
+# 计算每个 bin 的组间平均 log2 差
+diff_vec <- rowMeans(cnv_matrix[, pt_samples, drop = FALSE], na.rm = TRUE) -
+            rowMeans(cnv_matrix[, npt_samples, drop = FALSE], na.rm = TRUE)
+
+# 整理结果
+diff_df <- bin_info %>%
+  mutate(bin_id = paste0(chr, ":", start),
+         diff = diff_vec) %>%
+  filter(!is.na(diff)) %>%
+  arrange(desc(abs(diff)))
+
+# 输出 top 差异 bin
+top_diff_bins <- diff_df %>% top_n(100, wt = abs(diff))
+write.table(top_diff_bins, file.path(output_dir, "CNV_pre_vs_nonpre_diff_top100.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
+# 保存 BED 文件
+top_diff_bed <- top_diff_bins %>% select(chr, start, end)
+write.table(top_diff_bed, file.path(output_dir, "CNV_hotspot_bins_pre_vs_nonpre.bed"),
+            sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+# 可视化
+diff_df$chr <- factor(diff_df$chr, levels = names(chr_lengths))
+p <- ggplot(diff_df, aes(x = chr, y = abs(diff))) +
+  geom_boxplot(outlier.shape = NA, fill = "tomato", alpha = 0.6) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 0.6) +
+  labs(title = "CNV Difference Across Chromosomes",
+       x = "Chromosome", y = "|log2 CNV Difference|") +
+  theme_bw()
+ggsave(file.path(output_dir, "CNV_diff_chr_distribution_pre_vs_nonpre.pdf"), p, width = 10, height = 6)
+
+###开始CNV分析##
+# ===================== 完整的CNV与甲基化整合分析工作流程 =====================
+# 包含：CNV分析、甲基化整合、基因注释、差异分析和可视化
+# 排除X和Y染色体
+
+suppressMessages({
+  library(DNAcopy)
+  library(tidyverse)
+  library(pheatmap)
+  library(reshape2)
+  library(GenomicRanges)
+  library(rtracklayer)
+  library(annotatr)
+  library(ComplexHeatmap)
+  library(matrixStats)
+  library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+  library(org.Hs.eg.db)
+  library(AnnotationHub)
+  library(GenomicFeatures)
+  
+})
+
+# === 全局设置 ===------------------------------------
+cov_dir <- "D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-DSS\\CNV\\coverage_1M"             # 覆盖度文件目录
+output_dir <- "D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-DSS\\CNV\\r_output"          # 输出目录
+group_file <- "D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-DSS\\CNV\\complete_group_info.txt"  # 分组文件
+methyl_dir <- "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/差异-DSS/CNV/cov"               # 甲基化数据目录
+gene_anno_file <- "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/差异-DSS/CNV/Homo_sapiens.GRCh38.110.chr.gtf"         # 基因注释文件路径（需替换）
+
+# 创建输出目录
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 创建日志文件
+log_file <- file.path(output_dir, "analysis_log.txt")
+sink(log_file, append = FALSE)
+cat("===== 一体化CNV与甲基化分析流程 =====\n")
+cat("开始时间:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+sink()
+
+# === 染色体长度 (hg38) - 仅包含1-22号染色体 ===
+chr_lengths <- c(
+  '1'=248956422, '2'=242193529, '3'=198295559, '4'=190214555, '5'=181538259,
+  '6'=170805979, '7'=159345973, '8'=145138636, '9'=138394717, '10'=133797422,
+  '11'=135086622, '12'=133275309, '13'=114364328, '14'=107043718, '15'=101991189,
+  '16'=90338345, '17'=83257441, '18'=80373285, '19'=58617616, '20'=64444167,
+  '21'=46709983, '22'=50818468
+) # 移除了X和Y染色体
+
+# 计算染色体累积位置
+cum_lengths <- cumsum(c(0, chr_lengths[-length(chr_lengths)]))
+names(cum_lengths) <- names(chr_lengths)
+
+# === 1. 读取分组信息 ===------------------------------------
+cat("=== 步骤1: 读取分组信息 ===\n")
+group_df <- read.table(group_file, header = TRUE, stringsAsFactors = FALSE)
+colnames(group_df) <- c("Sample", "Group")
+group_df$Sample <- as.character(group_df$Sample)
+
+# 打印分组信息摘要
+cat("📊 分组信息摘要:\n")
+print(table(group_df$Group))
+
+# === 2. 读取覆盖度文件 ===---------------------------
+cat("\n=== 步骤2: 读取覆盖度文件 ===\n")
+files <- list.files(cov_dir, pattern = "_coverage.txt$", full.names = TRUE)
+cat("📁 找到", length(files), "个覆盖度文件\n")
+
+signal_list <- list()
+all_read_counts <- list()
+bin_info <- NULL
+
+for (file in files) {
+  sample_name <- gsub("_coverage.txt", "", basename(file))
+  cat("🔄 处理样本:", sample_name, "\n")
+  
+  # 读取数据
+  df <- read.table(file, header = FALSE, stringsAsFactors = FALSE)
+  
+  # 检查列数
+  if (ncol(df) < 7) {
+    cat("⚠️ 文件列数不足:", ncol(df), "期望7列 - 添加缺失列\n")
+    missing_cols <- 7 - ncol(df)
+    for (i in 1:missing_cols) {
+      df[[paste0("V", ncol(df) + 1)]] <- NA
+    }
+  }
+  
+  # 设置列名
+  colnames(df)[1:7] <- c("chr", "start", "end", "read_count", "covered_bases", "bin_size", "fraction")
+  
+  # 排除X和Y染色体
+  df <- df %>% filter(chr %in% names(chr_lengths))
+  
+  # 保存bin信息（只取第一个样本）
+  if (is.null(bin_info)) {
+    bin_info <- df[, c("chr", "start", "end")]
+    bin_info$global_pos <- bin_info$start + cum_lengths[as.character(bin_info$chr)]
+  }
+  
+  # 保存read_count
+  all_read_counts[[sample_name]] <- df$read_count
+}
+
+# === 3. 构建read count矩阵 ===--------------------------------
+cat("\n=== 步骤3: 构建read count矩阵 ===\n")
+read_count_matrix <- do.call(cbind, all_read_counts)
+rownames(read_count_matrix) <- paste0(bin_info$chr, ":", bin_info$start)
+
+# === 4. 标准化处理 ===-------------------------
+cat("\n=== 步骤4: 标准化处理 ===\n")
+normal_samples <- group_df$Sample[group_df$Group == "Normal"]
+if (length(normal_samples) == 0) {
+  stop("❌ 没有找到正常组样本，请检查分组文件")
+}
+
+cat("🔬 使用", length(normal_samples), "个正常样本作为参考\n")
+normal_matrix <- read_count_matrix[, normal_samples, drop = FALSE]
+
+# 计算参考中位数
+ref_median <- rowMedians(normal_matrix, na.rm = TRUE)
+
+# 标准化并计算log2 coverage
+for (sample_name in colnames(read_count_matrix)) {
+  cat("🔄 标准化样本:", sample_name, "\n")
+  
+  read_count <- read_count_matrix[, sample_name]
+  valid_idx <- !is.na(read_count) & !is.na(ref_median) & read_count > 0 & ref_median > 0
+  log2cov <- rep(NA, length(read_count))
+  log2cov[valid_idx] <- log2(read_count[valid_idx] / ref_median[valid_idx])
+  
+  signal_list[[sample_name]] <- log2cov
+}
+
+# 构建log2 coverage矩阵
+cnv_matrix <- do.call(cbind, signal_list)
+rownames(cnv_matrix) <- rownames(read_count_matrix)
+
+# === 5. 样本对齐和排序 ===------------------------------
+cat("\n=== 步骤5: 样本对齐和排序 ===\n")
+valid_samples <- intersect(colnames(cnv_matrix), group_df$Sample)
+if (length(valid_samples) == 0) {
+  stop("❌ 没有匹配的样本，请检查样本名称")
+}
+
+cnv_matrix <- cnv_matrix[, valid_samples, drop = FALSE]
+group_df <- group_df %>% filter(Sample %in% valid_samples)
+group_df <- group_df[match(colnames(cnv_matrix), group_df$Sample), ]
+
+# 按染色体顺序排序
+chr_order <- names(chr_lengths)
+bin_chr <- gsub(":.*", "", rownames(cnv_matrix))
+bin_start <- as.numeric(gsub(".*:", "", rownames(cnv_matrix)))
+bin_order <- order(factor(bin_chr, levels = chr_order), bin_start)
+cnv_matrix <- cnv_matrix[bin_order, , drop = FALSE]
+bin_info <- bin_info[bin_order, ]
+
+cat("✅ 有效样本数量:", ncol(cnv_matrix), "\n")
+
+# === 6. CNV分段分析 ===----------------------------------------
+cat("\n=== 步骤6: CNV分段分析 ===\n")
+cnv_score_list <- list()
+
+for (sample_name in colnames(cnv_matrix)) {
+  cat("🔍 分段分析:", sample_name, "\n")
+  
+  log2cov <- cnv_matrix[, sample_name]
+  valid_idx <- !is.na(log2cov)
+  
+  if (sum(valid_idx) < 100) {
+    cat("⚠️  跳过", sample_name, "- 有效bin太少:", sum(valid_idx), "\n")
+    next
+  }
+  
+  # DNAcopy分段
+  CNAobj <- CNA(
+    genomdat = log2cov[valid_idx],
+    chrom = bin_chr[valid_idx],
+    maploc = bin_start[valid_idx],
+    data.type = "logratio"
+  )
+  
+  smoothCNA <- smooth.CNA(CNAobj)
+  seg <- segment(smoothCNA, alpha = 0.01, nperm = 10000, verbose = 0)
+  
+  # 保存分段结果
+  seg_file <- file.path(output_dir, paste0(sample_name, "_segments.txt"))
+  write.table(seg$output, seg_file, sep = "\t", quote = FALSE, row.names = FALSE)
+  
+  # 计算CNV Score
+  cnv_score <- mean(abs(seg$output$seg.mean), na.rm = TRUE)
+  cnv_score_list[[sample_name]] <- cnv_score
+  
+  score_file <- file.path(output_dir, paste0(sample_name, "_CNVscore.txt"))
+  write.table(
+    data.frame(Sample = sample_name, CNV_Score = cnv_score),
+    score_file, sep = "\t", quote = FALSE, row.names = FALSE)
+}
+# === 按染色体绘制热图 ===
+for (chrom in unique(bin_info$chr)) {
+  if (!chrom %in% chr_order) next
+  
+  cat("📊 绘制染色体", chrom, "热图\n")
+  chr_idx <- bin_info$chr == chrom
+  
+  # 每染色体最多显示1000个bin
+  n_bins <- sum(chr_idx)
+  if (n_bins > 1000) {
+    display_bins <- seq(1, n_bins, length.out = 1000)
+    chr_matrix <- cnv_matrix[chr_idx, , drop = FALSE][display_bins, ]
+  } else {
+    chr_matrix <- cnv_matrix[chr_idx, , drop = FALSE]
+  }
+  
+  # 对样本按 Group 排序
+  sample_order <- group_df %>%
+    arrange(Group) %>%
+    pull(Sample)
+  
+  chr_matrix <- chr_matrix[, sample_order, drop = FALSE]
+  
+  # 创建注释数据
+  annotation_df <- data.frame(
+    Group = group_df$Group,
+    row.names = group_df$Sample
+  )[sample_order, , drop = FALSE]
+  
+  # 绘制热图
+  pdf(file.path(output_dir, paste0("CNV_heatmap_chr", chrom, ".pdf")), 
+      width = 12, height = 9)
+  pheatmap::pheatmap(chr_matrix,
+                     show_rownames = FALSE,
+                     show_colnames = FALSE,
+                     cluster_cols = FALSE,  # 不聚类列，保持 sample_order 顺序
+                     cluster_rows = FALSE,
+                     annotation_col = annotation_df,
+                     main = paste("Chr", chrom, "CNV Profile"),
+                     fontsize_col = 8,
+                     cutree_cols = 2)
+  dev.off()
+}
+# === 7. 差异热点区域分析 ===-----------------------------------------
+
+# cat("\n=== 步骤7: 差异热点区域分析 ===\n")
+# pt_samples <- group_df$Sample[group_df$Group == "pre_tumor"]
+# npt_samples <- group_df$Sample[group_df$Group == "non_pre_tumor"]
+# 
+# # 计算每个bin的组间平均CNV差异
+# diff_vec <- rowMeans(cnv_matrix[, pt_samples, drop = FALSE], na.rm = TRUE) -
+#   rowMeans(cnv_matrix[, npt_samples, drop = FALSE], na.rm = TRUE)
+# 
+# # 创建差异数据框
+# diff_df <- data.frame(
+#   bin_id = rownames(cnv_matrix),
+#   chr = bin_info$chr,
+#   start = bin_info$start,
+#   end = bin_info$end,
+#   cnv_diff = diff_vec,
+#   stringsAsFactors = FALSE
+# )
+# 
+# # 添加全局位置
+# diff_df$global_pos <- bin_info$global_pos
+# 
+# # 筛选显著差异区域 (|CNV差异| > 0.1)
+# sig_diff_df <- diff_df %>% 
+#   filter(abs(cnv_diff) > 0.1) %>%
+#   arrange(desc(abs(cnv_diff)))
+
+cat("\n=== 步骤7: 差异热点区域分析（带统计学检验） ===\n")
+pt_samples <- group_df$Sample[group_df$Group == "pre_tumor"]
+npt_samples <- group_df$Sample[group_df$Group == "non_pre_tumor"]
+
+# 计算每个bin的组间差异和P值
+# 使用Wilcoxon秩和检验
+diff_results <- apply(cnv_matrix, 1, function(x) {
+  pt_vals <- x[pt_samples]
+  npt_vals <- x[npt_samples]
+  
+  pt_vals <- pt_vals[!is.na(pt_vals)]
+  npt_vals <- npt_vals[!is.na(npt_vals)]
+  
+  mean_diff <- mean(pt_vals) - mean(npt_vals)
+  
+  if (length(pt_vals) >= 3 && length(npt_vals) >= 3) {
+    wilcox_test <- wilcox.test(pt_vals, npt_vals)
+    p_value <- wilcox_test$p.value
+  } else {
+    p_value <- NA
+  }
+  
+  return(c(mean_diff = mean_diff, p_value = p_value))
+})
+# 转换为数据框
+diff_matrix <- t(diff_results)
+diff_df <- data.frame(
+  bin_id = rownames(cnv_matrix),
+  chr = bin_info$chr,
+  start = bin_info$start,
+  end = bin_info$end,
+  cnv_diff = diff_matrix[, "mean_diff"],
+  p_value = diff_matrix[, "p_value"],
+  stringsAsFactors = FALSE
+)
+
+# 添加FDR校正
+diff_df$fdr <- p.adjust(diff_df$p_value, method = "fdr")
+
+# 筛选显著差异区域（基于FDR和差异幅度）
+sig_diff_df <- diff_df %>% 
+  filter(p_value < 0.05 & abs(cnv_diff) > 0.2) %>%
+  arrange(p_value, desc(abs(cnv_diff)))
+
+
+table(sig_diff_df$chr)
+# 保存结果
+write.table(sig_diff_df, file.path(output_dir, "CNV_diff_hotspots.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
+cat("🔍 发现", nrow(sig_diff_df), "个显著差异热点区域\n")
+
+
+#####绘制热点区域热图
+cat("📊 绘制热点区域热图（top 100）\n")
+
+library(ComplexHeatmap)
+library(circlize)
+
+# 提取top 100差异最大的热点
+top_hotspots <- sig_diff_df %>%
+  arrange(desc(abs(cnv_diff))) %>%
+  head(100) %>%
+  pull(bin_id)
+
+# 提取对应CNV矩阵
+hotspot_matrix <- cnv_matrix[top_hotspots, , drop = FALSE]
+
+# 重新匹配group_df顺序为当前列顺序
+group_df_aligned <- group_df %>% filter(Sample %in% colnames(hotspot_matrix))
+group_df_aligned <- group_df_aligned[match(colnames(hotspot_matrix), group_df_aligned$Sample), ]
+
+# 检查是否完全匹配
+stopifnot(identical(group_df_aligned$Sample, colnames(hotspot_matrix)))
+
+# 样本注释（Group）
+sample_anno <- data.frame(Group = group_df_aligned$Group)
+rownames(sample_anno) <- group_df_aligned$Sample
+
+# 构建 column_split（必须和matrix列顺序一致）
+column_split <- factor(sample_anno$Group, levels = unique(sample_anno$Group))
+
+# 热点注释
+hotspot_anno <- data.frame(
+  Chromosome = gsub(":.*", "", top_hotspots),
+  CNV_Diff = sig_diff_df[match(top_hotspots, sig_diff_df$bin_id), "cnv_diff"],
+  row.names = top_hotspots
+)
+
+# 颜色设定
+group_colors <- c(Normal = "gray", pre_tumor = "red", non_pre_tumor = "blue")
+diff_colors <- colorRamp2(
+  c(-max(abs(hotspot_anno$CNV_Diff)), 0, max(abs(hotspot_anno$CNV_Diff))),
+  c("blue", "white", "red")
+)
+
+# 注释对象
+top_anno <- HeatmapAnnotation(
+  Group = sample_anno$Group,
+  col = list(Group = group_colors),
+  annotation_name_side = "left"
+)
+
+right_anno <- rowAnnotation(
+  CNV_Diff = hotspot_anno$CNV_Diff,
+  col = list(CNV_Diff = diff_colors),
+  annotation_name_rot = 0
+)
+
+# 绘制热图
+pdf(file.path(output_dir, "cnv_diff_hotspots_heatmap.pdf"), width = 12, height = 10)
+Heatmap(hotspot_matrix,
+        name = "CNV",
+        col = colorRamp2(c(-1, 0, 1), c("blue", "white", "red")),
+        top_annotation = top_anno,
+        right_annotation = right_anno,
+        column_split = column_split,
+        show_row_names = FALSE,
+        show_column_names = FALSE,
+        cluster_columns = FALSE,
+        cluster_rows = TRUE)
+dev.off()
+
+# ===7.5 差异CNV区域落在哪些功能区域上===-------------------------------
+
+cat("\n=== 步骤7.5: 差异CNV区域在基因组功能区域的富集分析 ===\n")
+
+library(GenomicRanges)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(stringr)
+
+# 设置路径
+anno_dir <- "D:/CTC甲基化谱/基因区域注释文件/重要区域"
+bed_files <- list.files(anno_dir, pattern = "\\.bed$", full.names = TRUE)
+
+# 构建CNV hotspot的 GRanges 对象（加上 chr 前缀）
+cnv_hotspot_gr <- GRanges(
+  seqnames = paste0("chr", sig_diff_df$chr),
+  ranges = IRanges(start = sig_diff_df$start, end = sig_diff_df$end),
+  bin_id = sig_diff_df$bin_id
+)
+
+# 设置重叠比例阈值（比如交叠超过 bin 的 30% 才算）
+min_overlap_ratio <- 0
+
+# 初始化结果
+anno_hit_df <- data.frame()
+
+for (bed in bed_files) {
+  anno_name <- tools::file_path_sans_ext(basename(bed))
+  
+  anno_df <- read_tsv(bed, col_names = FALSE, col_types = cols(.default = "c"))[, 1:3]
+  colnames(anno_df) <- c("chr", "start", "end")
+  anno_df <- anno_df %>%
+    mutate(start = as.integer(start), end = as.integer(end)) %>%
+    filter(str_detect(chr, "^chr[0-9]+$"))
+  
+  anno_gr <- GRanges(seqnames = anno_df$chr,
+                     ranges = IRanges(start = anno_df$start, end = anno_df$end))
+  
+  # 找交叠
+  hits <- findOverlaps(cnv_hotspot_gr, anno_gr)
+  
+  # 获取重叠长度
+  intersected <- pintersect(cnv_hotspot_gr[queryHits(hits)], anno_gr[subjectHits(hits)])
+  overlap_len <- width(intersected)
+  
+  # 获取对应 bin 长度
+  bin_len <- width(cnv_hotspot_gr[queryHits(hits)])
+  
+  # 计算比例
+  overlap_ratio <- overlap_len / bin_len
+  
+  # 筛选满足比例阈值的 bin_id
+  valid_hits <- which(overlap_ratio >= min_overlap_ratio)
+  valid_bins <- unique(cnv_hotspot_gr$bin_id[queryHits(hits)[valid_hits]])
+  
+  # 存储结果
+  anno_hit_df <- rbind(anno_hit_df, data.frame(
+    Annotation = anno_name,
+    Overlapping_Hotspots = length(valid_bins)
+  ))
+}
+
+# 排序 + 可视化（跟之前代码一样）
+anno_hit_df <- anno_hit_df %>% arrange(desc(Overlapping_Hotspots))
+
+anno_hit_df
+p_anno_bar <- ggplot(anno_hit_df, aes(x = reorder(Annotation, Overlapping_Hotspots), 
+                                      y = Overlapping_Hotspots)) +
+  geom_col(fill = "#2780E3") +
+  coord_flip() +
+  labs(title = paste0("CNV差异区域富集（overlap≥", min_overlap_ratio * 100, "%）"),
+       x = "功能注释区域", y = "命中的CNV bin数量") +
+  theme_minimal(base_size = 14)
+p_anno_bar
+ggsave(file.path(output_dir, "CNV_hotspot_functional_annotation_filtered.pdf"),
+       p_anno_bar, width = 9, height = max(5, nrow(anno_hit_df)*0.4))
+
+
+# === 8. 甲基化差异分析 ===------------------------------
+cat("\n=== 步骤8: 甲基化差异分析 ===\n")
+
+# 函数：读取单个样本的甲基化数据
+read_methyl_data <- function(sample_id, group) {
+  chr_lengths <- c(paste0("chr", 1:22), as.character(1:22))  # 兼容两种命名格式
+  # 确定文件路径
+  if (group == "Normal") {
+    file_path <- file.path(methyl_dir, "normal", paste0(sample_id, ".cov"))
+  } else if (group == "pre_tumor") {
+    file_path <- file.path(methyl_dir, "pre_tumor", paste0(sample_id, ".cov"))
+  } else if (group == "non_pre_tumor") {
+    file_path <- file.path(methyl_dir, "non_pre_tumor", paste0(sample_id, ".cov"))
+  } else {
+    return(NULL)
+  }
+  
+  if (!file.exists(file_path)) {
+    cat("⚠️ 甲基化文件不存在:", file_path, "\n")
+    return(NULL)
+  }
+  
+  
+  # 读取甲基化数据
+  library(readr)
+  library(dplyr)
+  meth_data <- read_tsv(file_path, col_names = c("chr", "pos", "N", "X"), 
+                        col_types = cols(
+                          chr = col_character(),
+                          pos = col_integer(),
+                          N = col_integer(),
+                          X = col_integer()
+                        )) %>%
+    mutate(methyl_frac = X / N,
+           sample_id = sample_id,
+           group = group) %>%
+    # 排除X和Y染色体
+    filter(chr %in% chr_lengths)
+  
+  return(meth_data)
+}
+
+
+
+# 创建甲基化GRanges对象
+meth_gr <- GRanges(
+  seqnames = sig_diff_df$chr,
+  ranges = IRanges(start = sig_diff_df$start, end = sig_diff_df$end),
+  bin_id = sig_diff_df$bin_id
+)
+# 如果 meth_gr 是 "1", "2", ... 而 sample_gr 是 "chr1", "chr2", ...
+seqlevels(meth_gr) <- paste0("chr", seqlevels(meth_gr))
+# 初始化甲基化矩阵
+meth_matrix <- matrix(NA, nrow = nrow(sig_diff_df), ncol = nrow(group_df),
+                      dimnames = list(sig_diff_df$bin_id, group_df$Sample))
+
+# 处理每个样本的甲基化数据
+for (i in 1:nrow(group_df)) {
+  #i<-1
+  sample_id <- group_df$Sample[i]
+  group <- group_df$Group[i]
+  
+  cat("🔬 处理样本甲基化数据:", sample_id, "(", group, ")\n")
+  
+  # 读取甲基化数据
+  sample_meth <- read_methyl_data(sample_id, group)
+  
+  if (is.null(sample_meth) || nrow(sample_meth) == 0) {
+    cat("⚠️ 无甲基化数据或数据为空:", sample_id, "\n")
+    next
+  }
+  
+  # 创建样本的GRanges对象
+  sample_gr <- GRanges(
+    seqnames = sample_meth$chr,
+    ranges = IRanges(start = sample_meth$pos, end = sample_meth$pos),
+    methyl_frac = sample_meth$methyl_frac
+  )
+  
+  # 找到重叠区域
+  overlaps <- findOverlaps(meth_gr, sample_gr)
+  
+  
+  if (length(overlaps) == 0) {
+    cat("⚠️ 无重叠甲基化位点:", sample_id, "\n")
+    next
+  }
+  
+  # 计算每个bin的平均甲基化水平
+  bin_methyl <- data.frame(
+    bin_id = meth_gr$bin_id[queryHits(overlaps)],
+    methyl_frac = sample_gr$methyl_frac[subjectHits(overlaps)]
+  ) %>%
+    group_by(bin_id) %>%
+    summarise(mean_methyl = mean(methyl_frac, na.rm = TRUE))
+  
+  # 填充矩阵
+  meth_matrix[bin_methyl$bin_id, sample_id] <- bin_methyl$mean_methyl
+}
+
+# 保存甲基化矩阵
+saveRDS(meth_matrix, file.path(output_dir, "hotspot_methyl_matrix.rds"))####
+# === 9. 热点区域甲基化水平分布 ===---------------------
+cat("\n=== 步骤9: CNV热点区域甲基化水平可视化 ===\n")
+
+library(ggpubr)
+
+# 筛选样本（只保留 pre_tumor 和 non_pre_tumor）
+plot_samples <- group_df %>%
+  filter(Group %in% c("pre_tumor", "non_pre_tumor"))
+
+# 提取对应的甲基化矩阵
+meth_matrix_plot <- meth_matrix[, plot_samples$Sample, drop = FALSE]
+
+# reshape 成长格式
+meth_long <- as.data.frame(meth_matrix_plot) %>%
+  rownames_to_column("bin_id") %>%
+  pivot_longer(-bin_id, names_to = "Sample", values_to = "methylation") %>%
+  left_join(plot_samples, by = "Sample") %>%
+  drop_na(methylation)
+
+# 画箱图
+pdf(file.path(output_dir, "methylation_in_hotspot_bins_boxplot.pdf"), width = 10, height = 6)
+ggboxplot(meth_long,
+          x = "Group",
+          y = "methylation",
+          color = "Group",
+          palette = c("pre_tumor" = "#EE564B", "non_pre_tumor" = "#93C0DF"),
+          add = "jitter",
+          xlab = "Group",
+          ylab = "Methylation Level",
+          title = "Methylation in CNV Hotspot Regions") +
+  stat_compare_means(method = "wilcox.test", label = "p.format")
+dev.off()
+
+cat("📊 已保存箱图到 methylation_in_hotspot_bins_boxplot.pdf\n")
+
+
+
+
+# ===== 步骤9补充：计算甲基化异质性（CV）并画图 =====
+cat("\n=== 步骤9补充: 甲基化异质性（CV）分析 ===\n")
+
+# 准备分组信息
+pt_samples <- group_df$Sample[group_df$Group == "pre_tumor"]
+npt_samples <- group_df$Sample[group_df$Group == "non_pre_tumor"]
+
+# 计算CV函数（按行）
+row_cv <- function(mat) {
+  rowSds(mat, na.rm = TRUE) / rowMeans(mat, na.rm = TRUE)
+}
+
+# 计算每组CV
+cv_df <- data.frame(
+  bin_id = rownames(meth_matrix),
+  CV_pre = row_cv(meth_matrix[, pt_samples, drop = FALSE]),
+  CV_nonpre = row_cv(meth_matrix[, npt_samples, drop = FALSE])
+)
+
+# reshape成长格式
+cv_long <- cv_df %>%
+  pivot_longer(cols = starts_with("CV_"),
+               names_to = "Group",
+               names_prefix = "CV_",
+               values_to = "CV") %>%
+  mutate(Group = ifelse(Group == "pre", "pre_tumor", "non_pre_tumor"))
+
+# 绘图 + 显著性检验
+pdf(file.path(output_dir, "methylation_variation_CV_boxplot.pdf"), width = 8, height = 6)
+ggboxplot(cv_long, x = "Group", y = "CV", fill = "Group",
+          palette = c("pre_tumor" = "#EE564B", "non_pre_tumor" = "#93C0DF"),
+          add = "jitter") +
+  stat_compare_means(method = "wilcox.test", label = "p.format") +
+  labs(title = "甲基化异质性（CV）比较",
+       y = "Coefficient of Variation (CV)",
+       x = "Group") +
+  theme_bw()
+dev.off()
+
+# === 10. 基因注释 ===---------------------------------------------------
+cat("\n=== 步骤10: 基因注释 ===\n")
+
+# 加载基因注释
+if (file.exists(gene_anno_file)) {
+  # 使用rtracklayer导入GTF
+  gtf <- import(gene_anno_file)
+  
+  
+  # 提取转录起始位点（TSS）
+  tss_gr <- promoters(gtf[gtf$type == "gene"], upstream = 2000, downstream = 500)
+  
+  # 提取基因信息
+  genes <- tss_gr[tss_gr$type == "gene" & tss_gr$gene_biotype == "protein_coding"]
+  
+  head(mcols(genes))
+  gene_df <- data.frame(
+    chr = seqnames(genes),
+    start = start(genes),
+    end = end(genes),
+    gene_id = genes$gene_id,
+    gene_name = genes$gene_name,
+    gene_type = genes$type,
+    stringsAsFactors = FALSE
+  ) %>%
+    # 排除X和Y染色体
+    filter(chr %in% names(chr_lengths))
+}
+
+
+# 假设 sig_diff_df 有列：cnv_diff, bin_id, chr, start, end
+filtered_bins <- sig_diff_df %>%
+  filter(abs(cnv_diff) > 0.1)  # 可以改成你想要的阈值
+
+
+# 创建热点区域GRanges
+hotspot_gr <- GRanges(
+  seqnames = filtered_bins$chr,
+  ranges = IRanges(start = filtered_bins$start, end = filtered_bins$end),
+  bin_id = filtered_bins$bin_id
+)
+
+
+# 创建基因GRanges
+gene_gr <- GRanges(
+  seqnames = gene_df$chr,
+  ranges = IRanges(start = gene_df$start, end = gene_df$end),
+  gene_id = gene_df$gene_id,
+  gene_name = gene_df$gene_name
+)
+
+# 找到重叠的基因
+overlaps <- findOverlaps(hotspot_gr, gene_gr)
+overlap_df <- data.frame(
+  bin_id = hotspot_gr$bin_id[queryHits(overlaps)],
+  gene_id = gene_gr$gene_id[subjectHits(overlaps)],
+  gene_name = gene_gr$gene_name[subjectHits(overlaps)]
+)
+
+# 合并注释信息
+annotated_diff <- sig_diff_df %>%
+  left_join(overlap_df, by = "bin_id") %>%
+  filter(!is.na(gene_name)) %>%
+  distinct(bin_id, gene_name, .keep_all = TRUE)
+
+# 保存注释结果
+write.table(annotated_diff, file.path(output_dir, "CNV_hotspots_gene.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
+
+up_ge<-annotated_diff[which(annotated_diff$cnv_diff>0),]
+
+# === 11. 可视化基因CNV ===---------------------------------------------
+# 你的前列腺癌核心基因
+#("TP53", "MAP3K11", "NKX3-1","INPP5K","PPP1R2","APOD")#CNV下降
+#("GFRAL", "SLITRK6", "HMGCLL1")#CNV增加
+
+target_genes <- c("TP53", "MAP3K11", "NKX3-1","INPP5K","PPP1R2","APOD","GFRAL", "SLITRK6", "HMGCLL1")#CNV下降
+
+
+# 从 annotated_diff 提取这些基因对应 bin 的平均 cnv_diff
+gene_cnv_summary <- annotated_diff %>%
+  filter(gene_name %in% target_genes) %>%
+  group_by(gene_name) %>%
+  summarise(mean_cnv_diff = mean(cnv_diff, na.rm = TRUE)) %>%
+  arrange(desc(mean_cnv_diff))
+
+# 画图：条形图展示
+library(ggplot2)
+ggplot(gene_cnv_summary, aes(x = reorder(gene_name, mean_cnv_diff), y = mean_cnv_diff, fill = mean_cnv_diff > 0)) +
+  geom_col(width = 0.6) +
+  scale_fill_manual(values = c("TRUE" = "#EE564B", "FALSE" = "#93C0DF")) +
+  coord_flip() +
+  labs(
+    title = "CNV Difference of Key Prostate Cancer Genes",
+    x = "Gene",
+    y = "CNV Difference (pre_tumor - non_pre_tumor)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# === 12. 目标基因启动子区域的甲基化水平  ===--------------------------------
+cat("\n=== 12.: 提取目标基因启动子区域的甲基化水平 ===\n")
+
+library(GenomicRanges)
+library(rtracklayer)
+library(dplyr)
+library(readr)
+library(tibble)
+# === 参数设置 ===
+target_genes <- c("TP53", "MAP3K11", "NKX3-1", "INPP5K", "PPP1R2", "APOD", "GFRAL", "SLITRK6", "HMGCLL1")
+gene_anno_file <- "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/DSS/CNV/Homo_sapiens.GRCh38.110.chr.gtf"
+group_file <- "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/DSS/CNV/complete_group_info.txt"
+methyl_dir <- "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/DSS/CNV/cov"
+
+# === 加载分组信息 ===
+group_df <- read.delim(group_file, sep = "\t", stringsAsFactors = FALSE)
+
+# === 读取基因注释 ===
+gtf <- import(gene_anno_file)
+seqlevels(gtf) <- paste0("chr", seqlevels(gtf))
+gene_gr <- gtf[gtf$type == "gene" & gtf$gene_name %in% target_genes]
+tss_gr <- promoters(gene_gr, upstream = 2000, downstream = 500)
+
+# 添加 gene name 信息
+tss_gr$gene_name <- gene_gr$gene_name
+
+# 构建结果框架
+results <- list()
+
+# === 遍历每个样本 ===
+for (i in 1:nrow(group_df)) {
+  #i<-1
+  sample_id <- group_df$Sample[i]
+  group <- group_df$Group[i]
+  
+  # 构造文件路径
+  file_path <- file.path(methyl_dir, tolower(group), paste0(sample_id, ".cov"))
+  
+  if (!file.exists(file_path)) {
+    cat("⚠️ 文件不存在:", file_path, "\n")
+    next
+  }
+  
+  cat("🔬 处理样本:", sample_id, "(", group, ")\n")
+  
+  # 读取 cov 文件
+  cov_df <- read_tsv(file_path, col_names = c("chr", "pos", "N", "X"),
+                     col_types = cols(
+                       chr = col_character(),
+                       pos = col_integer(),
+                       N = col_integer(),
+                       X = col_integer()
+                     )) %>%
+    mutate(methyl_frac = X / N) %>%
+    filter(N > 0)  # 避免除以0
+  
+  # 构建 GRanges
+  cov_gr <- GRanges(seqnames = cov_df$chr,
+                    ranges = IRanges(start = cov_df$pos, end = cov_df$pos),
+                    methyl_frac = cov_df$methyl_frac)
+  
+  # 找每个基因的启动子区域甲基化水平
+  for (j in seq_along(tss_gr)) {
+    #j<-1
+    gene <- tss_gr$gene_name[j]
+    region <- tss_gr[j]
+    
+    hits <- findOverlaps(region, cov_gr)
+    meth_vals <- cov_gr$methyl_frac[subjectHits(hits)]
+    
+    if (length(meth_vals) < 3) {
+      mean_meth <- NA  # 命中太少，不可信
+    } else {
+      mean_meth <- mean(meth_vals, na.rm = TRUE)
+    }
+    
+    results[[length(results) + 1]] <- data.frame(
+      sample = sample_id,
+      group = group,
+      gene = gene,
+      mean_promoter_methylation = mean_meth,
+      num_CpGs = length(meth_vals)
+    )
+    
+  }
+}
+
+# === 汇总输出 ===
+final_df <- bind_rows(results)
+write.csv(final_df, file = file.path(methyl_dir, "gene_promoter_methylation.csv"), row.names = FALSE)
+final_df
+# 简单预处理
+
+final_df <- final_df %>% filter(!is.na(mean_promoter_methylation))
+
+# 查看前几行确认格式
+head(final_df)
+
+
+library(ggplot2)
+library(ggpubr)
+subset_genes <- "GFRAL"
+
+#("TP53", "MAP3K11", "NKX3-1","INPP5K","PPP1R2","APOD")#CNV下降
+#("GFRAL", "SLITRK6", "HMGCLL1")#CNV增加
+
+df_subset <- final_df %>% filter(gene %in% subset_genes)
+
+group_avg <- df_subset %>%
+  group_by(group) %>%
+  summarise(
+    mean_meth = mean(mean_promoter_methylation, na.rm = TRUE)
+  )
+
+pdf(file.path("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\DSS\\CNV\\r_output\\gene_promoter_methylation_barplot", 
+              "GFRAL.pdf"), width = 10, height = 6)
+ggplot(group_avg, aes(x = group, y = mean_meth, fill = group)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = round(mean_meth, 3)), vjust = -0.5, size = 5) +
+  labs(
+    title = subset_genes,
+    x = "Group",
+    y = "Mean promoter methylation"
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+dev.off()
+# === 13. 功能富集  ===--------------------------------
+
+
+
+up_genes <- annotated_diff %>%
+  filter(cnv_diff > 0.1) %>%   # 可根据阈值灵活调整
+  pull(gene_name) %>%
+  unique()
+
+down_genes <- annotated_diff %>%
+  filter(cnv_diff < -0.3) %>%
+  pull(gene_name) %>%
+  unique()
+class(down_genes)
+
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# 转换成 ENTREZID（你也可以用 SYMBOL 直接富集）
+up_ids <- bitr(up_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+down_ids <- bitr(down_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# GO 生物过程富集（也可以用 enrichKEGG / enrichPathway）
+ego_up <- enrichGO(gene = up_ids$ENTREZID, OrgDb = org.Hs.eg.db, ont = "BP", pvalueCutoff = 0.05)
+ego_down <- enrichGO(gene = down_ids$ENTREZID, OrgDb = org.Hs.eg.db, ont = "BP", pvalueCutoff = 0.05)
+
+# 提前筛选富集结果
+up_df <- as.data.frame(ego_up)
+rownames(up_df) <- 1:nrow(up_df)
+up_df<-up_df[c(5,9,10,12,15,19),]
+
+library(enrichplot)
+
+ggplot(up_df, aes(x = reorder(Description, -p.adjust), y = -log10(p.adjust))) +
+  geom_col(fill = "#93C0DF") +
+  coord_flip() +
+  labs(title = "功能通路富集（CNV扩增基因）",
+       x = "GO Term", y = "-log10(p.adjust)") +
+  theme_minimal()
+
+
+
+

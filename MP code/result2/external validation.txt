@@ -1,0 +1,3609 @@
+Final external-validation analysis code bundle
+Project: metastasis_ready_methylation_analysis
+Source directory: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation
+Generated: 2026-07-06 23:39:14
+
+Scope: final code used for MP-related external validation analyses and final Result 2 / supplementary external-validation figures.
+Excluded: download helpers, PPT builders/updaters, manuscript-revision scripts, exploratory datasets not used in final Result 2, and obsolete intermediate display scripts.
+
+Suggested execution order:
+- build_mp_gene_sets.py
+- run_gse176031_scrna_mp_validation.py
+- run_mp_high_followup_analyses.py
+- run_gse230282_spatial_mp_signature.py
+- run_specificity_control_analyses.py
+- run_final_marker_state_analyses.py
+- run_tcga_prad_methylation_expression_validation.py
+- run_tcga_clinical_aggressive_state.py
+- make_unified_core_panel_fdr_figures.py
+- build_result2_final_corrected_spatial_panel_20260608.py
+- make_figure2L_tcga_clinical_pairwise.py
+
+====================================================================================================
+
+====================================================================================================
+FILE: build_mp_gene_sets.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\build_mp_gene_sets.py
+====================================================================================================
+
+from __future__ import annotations
+
+import gzip
+import re
+from pathlib import Path
+
+import pandas as pd
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+ROOT = Path(r"D:\prostate cancer")
+GTF = BASE / "01_raw_data" / "external_omics_validation" / "gencode.v44.annotation.gtf.gz"
+RESULTS = BASE / "03_analysis_results" / "external_omics_validation" / "GSE176031_scRNA"
+
+
+MANUSCRIPT_HYPO = {
+    "MSX1",
+    "IRX2",
+    "LCP2",
+    "SIPA1",
+    "PIP5K1A",
+    "DNM1",
+    "KLF16",
+    "PRPSAP1",
+    "VIM",
+}
+MANUSCRIPT_HYPER = {
+    "SEMA3F",
+    "CADM2",
+    "RASSF10",
+    "CTNNBIP1",
+    "HOXA9",
+    "HOXA11-AS",
+    "TAL1",
+    "SBNO2",
+    "ICAM1",
+    "MYC",
+}
+CORE_TF = {"CEBPA", "AR", "SP1", "GATA3", "GREB1"}
+
+
+def find_file(parent_keyword: str, filename: str) -> Path:
+    matches = [
+        p
+        for p in ROOT.rglob(filename)
+        if parent_keyword in str(p.parent) and "metastasis_ready_methylation_analysis" not in str(p)
+    ]
+    if not matches:
+        raise FileNotFoundError(f"Could not find {filename} under {parent_keyword}")
+    return matches[0]
+
+
+def parse_gene_attrs(attr: str) -> tuple[str | None, str | None, str | None]:
+    gene_id = gene_name = gene_type = None
+    for key, value in re.findall(r'([A-Za-z0-9_]+) "([^"]+)"', attr):
+        if key == "gene_id":
+            gene_id = value.split(".")[0]
+        elif key == "gene_name":
+            gene_name = value
+        elif key in {"gene_type", "gene_biotype"}:
+            gene_type = value
+    return gene_id, gene_name, gene_type
+
+
+def load_tss() -> pd.DataFrame:
+    rows = []
+    with gzip.open(GTF, "rt", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith("#"):
+                continue
+            chrom, source, feature, start, end, score, strand, frame, attr = line.rstrip("\n").split("\t")
+            if feature != "gene":
+                continue
+            gene_id, gene_name, gene_type = parse_gene_attrs(attr)
+            if gene_name is None:
+                continue
+            start_i = int(start)
+            end_i = int(end)
+            tss = start_i if strand == "+" else end_i
+            rows.append((chrom, tss, gene_id, gene_name, gene_type, strand))
+    return pd.DataFrame(rows, columns=["chr", "tss", "gene_id", "gene_symbol", "gene_type", "strand"])
+
+
+def annotate_promoters(promoter_file: Path, tss: pd.DataFrame, label: str) -> pd.DataFrame:
+    regions = pd.read_csv(promoter_file, sep="\t")
+    if not {"chr", "start", "end"}.issubset(regions.columns):
+        raise ValueError(f"Missing chr/start/end in {promoter_file}")
+    annotated = []
+    for chrom, sub in regions.groupby("chr", sort=False):
+        tss_chr = tss[tss["chr"] == chrom]
+        if tss_chr.empty:
+            continue
+        starts = sub["start"].to_numpy()
+        ends = sub["end"].to_numpy()
+        for idx, row in sub.iterrows():
+            overlap = tss_chr[(tss_chr["tss"] >= row["start"] - 500) & (tss_chr["tss"] <= row["end"] + 500)]
+            if overlap.empty:
+                distances = (tss_chr["tss"] - ((row["start"] + row["end"]) / 2)).abs()
+                nearest_idx = distances.idxmin()
+                nearest = tss_chr.loc[[nearest_idx]].copy()
+                nearest["tss_distance"] = distances.loc[nearest_idx]
+                overlap = nearest[nearest["tss_distance"] <= 5000]
+            else:
+                overlap = overlap.copy()
+                overlap["tss_distance"] = (overlap["tss"] - ((row["start"] + row["end"]) / 2)).abs()
+            for _, gene in overlap.iterrows():
+                rec = row.to_dict()
+                rec.update(
+                    {
+                        "direction": label,
+                        "gene_symbol": gene["gene_symbol"],
+                        "gene_id": gene["gene_id"],
+                        "gene_type": gene["gene_type"],
+                        "tss": gene["tss"],
+                        "tss_distance": gene["tss_distance"],
+                    }
+                )
+                annotated.append(rec)
+    return pd.DataFrame(annotated)
+
+
+def read_gene_txt(keyword: str) -> set[str]:
+    genes = set()
+    for p in ROOT.rglob("*.txt"):
+        if keyword in str(p) and "metastasis_ready_methylation_analysis" not in str(p):
+            for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if line:
+                    genes.add(line)
+    return genes
+
+
+def main() -> None:
+    RESULTS.mkdir(parents=True, exist_ok=True)
+    tss = load_tss()
+    tss.to_csv(RESULTS / "gencode_v44_gene_tss.tsv", sep="\t", index=False)
+
+    promoter_down = find_file("差异启动子", "down_wilcox.bed")
+    promoter_up = find_file("差异启动子", "up_wilcox.bed")
+    hypo_annot = annotate_promoters(promoter_down, tss, "hypomethylated_promoter")
+    hyper_annot = annotate_promoters(promoter_up, tss, "hypermethylated_promoter")
+    promoter_annot = pd.concat([hypo_annot, hyper_annot], ignore_index=True)
+    promoter_annot.to_csv(RESULTS / "MP_differential_promoter_gene_annotation.tsv", sep="\t", index=False)
+
+    hypo_promoter = set(hypo_annot["gene_symbol"].dropna().astype(str))
+    hyper_promoter = set(hyper_annot["gene_symbol"].dropna().astype(str))
+    enhancer_low = read_gene_txt("低_增强子_基因")
+    enhancer_high = read_gene_txt("高_增强子_基因")
+
+    gene_sets = {
+        "MP_promoter_hypomethylated": sorted(hypo_promoter),
+        "MP_promoter_hypermethylated": sorted(hyper_promoter),
+        "MP_manuscript_hypomethylated_candidates": sorted(MANUSCRIPT_HYPO | enhancer_low),
+        "MP_manuscript_hypermethylated_candidates": sorted(MANUSCRIPT_HYPER | enhancer_high),
+        "MP_core_TF": sorted(CORE_TF),
+        "MP_scRNA_positive_signature": sorted((MANUSCRIPT_HYPO | enhancer_low | hypo_promoter | {"AR", "SP1", "GATA3", "GREB1"}) - MANUSCRIPT_HYPER),
+        "MP_scRNA_negative_signature": sorted(MANUSCRIPT_HYPER | enhancer_high | hyper_promoter),
+    }
+    rows = []
+    for name, genes in gene_sets.items():
+        for gene in genes:
+            rows.append({"gene_set": name, "gene_symbol": gene})
+    pd.DataFrame(rows).to_csv(RESULTS / "MP_gene_sets.tsv", sep="\t", index=False)
+
+    n_hypo_regions = pd.read_csv(promoter_down, sep="\t").shape[0]
+    n_hyper_regions = pd.read_csv(promoter_up, sep="\t").shape[0]
+    summary = [
+        "# MP gene sets",
+        "",
+        f"- Hypomethylated promoter regions: {n_hypo_regions}",
+        f"- Hypermethylated promoter regions: {n_hyper_regions}",
+        f"- Annotated hypomethylated promoter genes: {len(hypo_promoter)}",
+        f"- Annotated hypermethylated promoter genes: {len(hyper_promoter)}",
+        f"- Manuscript hypomethylated/candidate genes: {len(MANUSCRIPT_HYPO | enhancer_low)}",
+        f"- Manuscript hypermethylated/candidate genes: {len(MANUSCRIPT_HYPER | enhancer_high)}",
+        f"- Core TF genes: {len(CORE_TF)}",
+        "",
+        "Outputs:",
+        "- `MP_differential_promoter_gene_annotation.tsv`",
+        "- `MP_gene_sets.tsv`",
+    ]
+    (RESULTS / "MP_gene_sets_summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("\n".join(summary))
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: run_gse176031_scrna_mp_validation.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\run_gse176031_scrna_mp_validation.py
+====================================================================================================
+
+from __future__ import annotations
+
+import gzip
+import re
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import umap
+from scipy import stats
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+RAW = BASE / "01_raw_data" / "external_omics_validation" / "GSE176031_scRNA"
+RESULTS = BASE / "03_analysis_results" / "external_omics_validation" / "GSE176031_scRNA"
+PROCESSED = BASE / "02_processed_data" / "external_omics_validation" / "GSE176031_scRNA"
+FIGS = BASE / "04_figures_pdf" / "external_omics_validation" / "GSE176031_scRNA"
+NOTES = BASE / "08_notes" / "external_omics_validation"
+
+
+PALETTE = {
+    "Normal": "#4C78A8",
+    "Tumor": "#E45756",
+    "Epithelial": "#E45756",
+    "Immune": "#59A14F",
+    "Stromal": "#9C755F",
+    "Endothelial": "#76B7B2",
+    "Other": "#A7A7A7",
+}
+
+CELL_MARKERS = {
+    "Epithelial": ["EPCAM", "KRT8", "KRT18", "KRT19", "KRT5", "KRT14", "TP63", "AR", "NKX3-1", "KLK3", "ACPP"],
+    "Immune": ["PTPRC", "CD3D", "CD3E", "MS4A1", "NKG7", "LYZ", "LST1"],
+    "Stromal": ["COL1A1", "COL1A2", "DCN", "LUM", "ACTA2", "TAGLN"],
+    "Endothelial": ["PECAM1", "VWF", "KDR", "CLDN5", "ENG"],
+}
+
+DISPLAY_GENES = [
+    "SIPA1",
+    "PIP5K1A",
+    "DNM1",
+    "MSX1",
+    "IRX2",
+    "LCP2",
+    "KLF16",
+    "PRPSAP1",
+    "VIM",
+    "SEMA3F",
+    "CADM2",
+    "RASSF10",
+    "CTNNBIP1",
+    "HOXA9",
+    "TAL1",
+    "SBNO2",
+    "ICAM1",
+    "MYC",
+    "AR",
+    "SP1",
+    "GATA3",
+    "GREB1",
+    "CEBPA",
+]
+
+
+def parse_sample(path: Path) -> dict[str, str]:
+    name = path.name
+    gsm = name.split("_")[0]
+    patient_match = re.search(r"(PR\d+)", name)
+    patient = patient_match.group(1) if patient_match else "unknown"
+    condition = "Normal" if re.search(r"_N\d?_", name) else "Tumor"
+    replicate_match = re.search(r"_(N\d?|T\d?)_", name)
+    replicate = replicate_match.group(1) if replicate_match else "NA"
+    return {"gsm": gsm, "sample": name.replace("_dge.txt.gz", ""), "patient": patient, "condition": condition, "replicate": replicate}
+
+
+def read_gene_sets() -> dict[str, list[str]]:
+    table = pd.read_csv(RESULTS / "MP_gene_sets.tsv", sep="\t")
+    return {name: sorted(set(sub["gene_symbol"].astype(str))) for name, sub in table.groupby("gene_set")}
+
+
+def genes_to_keep(gene_sets: dict[str, list[str]]) -> list[str]:
+    genes = set(DISPLAY_GENES)
+    for values in gene_sets.values():
+        genes.update(values)
+    for values in CELL_MARKERS.values():
+        genes.update(values)
+    return sorted(genes)
+
+
+def read_selected_counts(path: Path, keep_genes: set[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    meta = parse_sample(path)
+    df = pd.read_csv(path, sep="\t", compression="gzip", index_col=0)
+    totals = df.sum(axis=0)
+    detected = (df > 0).sum(axis=0)
+    present = [g for g in keep_genes if g in df.index]
+    sub = df.loc[present].copy()
+    sub.columns = [f"{meta['sample']}|{c}" for c in sub.columns]
+    cell_meta = pd.DataFrame(
+        {
+            "cell_id": sub.columns,
+            "barcode": [c.split("|", 1)[1] for c in sub.columns],
+            "sample": meta["sample"],
+            "gsm": meta["gsm"],
+            "patient": meta["patient"],
+            "condition": meta["condition"],
+            "replicate": meta["replicate"],
+            "total_counts": totals.to_numpy(),
+            "detected_genes": detected.to_numpy(),
+        }
+    )
+    return sub, cell_meta
+
+
+def log_normalize(counts: pd.DataFrame, totals: pd.Series) -> pd.DataFrame:
+    aligned_totals = totals.reindex(counts.columns).replace(0, np.nan)
+    norm = counts.div(aligned_totals, axis=1) * 1e4
+    return np.log1p(norm).fillna(0)
+
+
+def mean_score(expr: pd.DataFrame, genes: list[str]) -> pd.Series:
+    present = [g for g in genes if g in expr.index]
+    if not present:
+        return pd.Series(np.nan, index=expr.columns)
+    return expr.loc[present].mean(axis=0)
+
+
+def assign_cell_types(expr: pd.DataFrame, meta: pd.DataFrame) -> pd.DataFrame:
+    scores = pd.DataFrame(index=expr.columns)
+    for label, genes in CELL_MARKERS.items():
+        scores[label] = mean_score(expr, genes)
+    best = scores.idxmax(axis=1)
+    best_score = scores.max(axis=1)
+    meta = meta.set_index("cell_id").copy()
+    for label in scores.columns:
+        meta[f"{label}_score"] = scores[label]
+    meta["cell_type_broad"] = np.where(best_score >= 0.15, best, "Other")
+    return meta.reset_index()
+
+
+def compute_scores(expr: pd.DataFrame, meta: pd.DataFrame, gene_sets: dict[str, list[str]]) -> pd.DataFrame:
+    meta = meta.set_index("cell_id").copy()
+    pos = gene_sets.get("MP_scRNA_positive_signature", [])
+    neg = gene_sets.get("MP_scRNA_negative_signature", [])
+    manuscript_pos = gene_sets.get("MP_manuscript_hypomethylated_candidates", [])
+    manuscript_neg = gene_sets.get("MP_manuscript_hypermethylated_candidates", [])
+    core_tf = gene_sets.get("MP_core_TF", [])
+
+    meta["MP_positive_score"] = mean_score(expr, pos)
+    meta["MP_negative_score"] = mean_score(expr, neg)
+    meta["MP_signature_score"] = meta["MP_positive_score"] - meta["MP_negative_score"]
+    meta["MP_manuscript_positive_score"] = mean_score(expr, manuscript_pos)
+    meta["MP_manuscript_negative_score"] = mean_score(expr, manuscript_neg)
+    meta["MP_manuscript_score"] = meta["MP_manuscript_positive_score"] - meta["MP_manuscript_negative_score"]
+    meta["MP_core_TF_score"] = mean_score(expr, core_tf)
+    return meta.reset_index()
+
+
+def statistics_table(meta: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    comparisons = [
+        ("all_cells", meta),
+        ("epithelial_like", meta[meta["cell_type_broad"] == "Epithelial"]),
+    ]
+    scores = ["MP_signature_score", "MP_manuscript_score", "MP_core_TF_score"]
+    for subset_name, sub in comparisons:
+        for score in scores:
+            normal = sub.loc[sub["condition"] == "Normal", score].dropna()
+            tumor = sub.loc[sub["condition"] == "Tumor", score].dropna()
+            if len(normal) and len(tumor):
+                stat, pvalue = stats.mannwhitneyu(tumor, normal, alternative="two-sided")
+                effect = tumor.median() - normal.median()
+            else:
+                pvalue = np.nan
+                effect = np.nan
+            rows.append(
+                {
+                    "subset": subset_name,
+                    "score": score,
+                    "n_normal": len(normal),
+                    "n_tumor": len(tumor),
+                    "median_normal": normal.median() if len(normal) else np.nan,
+                    "median_tumor": tumor.median() if len(tumor) else np.nan,
+                    "median_difference_tumor_minus_normal": effect,
+                    "pvalue_mannwhitney": pvalue,
+                }
+            )
+    stats_df = pd.DataFrame(rows)
+    p = stats_df["pvalue_mannwhitney"].to_numpy(dtype=float)
+    ok = np.isfinite(p)
+    fdr = np.full(len(p), np.nan)
+    if ok.sum():
+        order = np.argsort(p[ok])
+        ranked = p[ok][order] * ok.sum() / np.arange(1, ok.sum() + 1)
+        ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+        idx = np.where(ok)[0][order]
+        fdr[idx] = np.clip(ranked, 0, 1)
+    stats_df["FDR"] = fdr
+    return stats_df
+
+
+def prepare_embedding(expr: pd.DataFrame, meta: pd.DataFrame) -> pd.DataFrame:
+    genes = expr.var(axis=1).sort_values(ascending=False).head(min(250, expr.shape[0])).index
+    x = expr.loc[genes].T
+    x = StandardScaler(with_mean=True, with_std=True).fit_transform(x)
+    pcs = PCA(n_components=min(20, x.shape[1]), random_state=7).fit_transform(x)
+    emb = umap.UMAP(n_neighbors=30, min_dist=0.35, random_state=7).fit_transform(pcs)
+    out = meta[["cell_id"]].copy()
+    out["UMAP1"] = emb[:, 0]
+    out["UMAP2"] = emb[:, 1]
+    return out
+
+
+def plot_outputs(expr: pd.DataFrame, meta: pd.DataFrame, stats_df: pd.DataFrame, embedding: pd.DataFrame) -> None:
+    sns.set_theme(style="white", context="paper", font="Arial")
+    plt.rcParams.update({"pdf.fonttype": 42, "ps.fonttype": 42, "axes.linewidth": 0.8})
+
+    plot_meta = meta.merge(embedding, on="cell_id", how="left")
+
+    fig, axes = plt.subplots(1, 2, figsize=(8.8, 3.7), gridspec_kw={"width_ratios": [1, 1.15]})
+    sns.violinplot(
+        data=meta,
+        x="condition",
+        y="MP_signature_score",
+        order=["Normal", "Tumor"],
+        palette=PALETTE,
+        inner=None,
+        cut=0,
+        linewidth=0.6,
+        ax=axes[0],
+    )
+    sns.boxplot(
+        data=meta,
+        x="condition",
+        y="MP_signature_score",
+        order=["Normal", "Tumor"],
+        width=0.22,
+        showcaps=False,
+        boxprops={"facecolor": "white", "edgecolor": "#333333", "linewidth": 0.7},
+        whiskerprops={"linewidth": 0.7},
+        medianprops={"color": "#333333", "linewidth": 0.9},
+        showfliers=False,
+        ax=axes[0],
+    )
+    p = stats_df[(stats_df["subset"] == "all_cells") & (stats_df["score"] == "MP_signature_score")]["FDR"].iloc[0]
+    axes[0].set_title(f"All cells, FDR={p:.2e}")
+    axes[0].set_xlabel("")
+    axes[0].set_ylabel("MP signature score")
+
+    epithelial = meta[meta["cell_type_broad"] == "Epithelial"]
+    sns.violinplot(
+        data=epithelial,
+        x="condition",
+        y="MP_signature_score",
+        order=["Normal", "Tumor"],
+        palette=PALETTE,
+        inner=None,
+        cut=0,
+        linewidth=0.6,
+        ax=axes[1],
+    )
+    sns.boxplot(
+        data=epithelial,
+        x="condition",
+        y="MP_signature_score",
+        order=["Normal", "Tumor"],
+        width=0.22,
+        showcaps=False,
+        boxprops={"facecolor": "white", "edgecolor": "#333333", "linewidth": 0.7},
+        whiskerprops={"linewidth": 0.7},
+        medianprops={"color": "#333333", "linewidth": 0.9},
+        showfliers=False,
+        ax=axes[1],
+    )
+    p = stats_df[(stats_df["subset"] == "epithelial_like") & (stats_df["score"] == "MP_signature_score")]["FDR"].iloc[0]
+    axes[1].set_title(f"Epithelial-like cells, FDR={p:.2e}")
+    axes[1].set_xlabel("")
+    axes[1].set_ylabel("")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_MP_signature_violin.pdf")
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.5))
+    axes[0].scatter(plot_meta["UMAP1"], plot_meta["UMAP2"], c=plot_meta["condition"].map(PALETTE), s=3, alpha=0.75, linewidths=0)
+    axes[0].set_title("Condition")
+    axes[1].scatter(plot_meta["UMAP1"], plot_meta["UMAP2"], c=plot_meta["cell_type_broad"].map(PALETTE), s=3, alpha=0.75, linewidths=0)
+    axes[1].set_title("Broad cell state")
+    sc = axes[2].scatter(
+        plot_meta["UMAP1"],
+        plot_meta["UMAP2"],
+        c=plot_meta["MP_signature_score"],
+        cmap="viridis",
+        s=3,
+        alpha=0.8,
+        linewidths=0,
+    )
+    axes[2].set_title("MP signature")
+    for ax in axes:
+        ax.set_xlabel("UMAP1")
+        ax.set_ylabel("UMAP2")
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.colorbar(sc, ax=axes[2], fraction=0.046, pad=0.02, label="score")
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_MP_signature_umap.pdf")
+    plt.close(fig)
+
+    sample_mean = (
+        meta.groupby(["patient", "sample", "condition", "cell_type_broad"], as_index=False)
+        .agg(n_cells=("cell_id", "size"), MP_signature_score=("MP_signature_score", "mean"), MP_core_TF_score=("MP_core_TF_score", "mean"))
+    )
+    sample_mean.to_csv(RESULTS / "GSE176031_sample_level_MP_scores.tsv", sep="\t", index=False)
+    paired = (
+        sample_mean[sample_mean["cell_type_broad"] == "Epithelial"]
+        .groupby(["patient", "condition"], as_index=False)
+        .agg(MP_signature_score=("MP_signature_score", "mean"), n_cells=("n_cells", "sum"))
+    )
+    fig, ax = plt.subplots(figsize=(5.2, 3.6))
+    for patient, sub in paired.groupby("patient"):
+        sub = sub.set_index("condition").reindex(["Normal", "Tumor"]).reset_index()
+        if sub["MP_signature_score"].notna().sum() == 2:
+            ax.plot([0, 1], sub["MP_signature_score"], color="#777777", lw=0.8, alpha=0.65, zorder=1)
+    sns.stripplot(
+        data=paired,
+        x="condition",
+        y="MP_signature_score",
+        hue="patient",
+        order=["Normal", "Tumor"],
+        dodge=False,
+        size=5,
+        linewidth=0.4,
+        edgecolor="#333333",
+        ax=ax,
+    )
+    ax.set_xlabel("")
+    ax.set_ylabel("Mean MP signature score")
+    ax.legend(frameon=False, title="Patient", bbox_to_anchor=(1.02, 1), loc="upper left")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_epithelial_sample_level_MP_score.pdf")
+    plt.close(fig)
+
+    genes = [g for g in DISPLAY_GENES if g in expr.index]
+    groups = ["Normal_Epithelial", "Tumor_Epithelial", "Tumor_Other"]
+    tmp = meta.copy()
+    tmp["plot_group"] = np.where(
+        tmp["cell_type_broad"] == "Epithelial",
+        tmp["condition"] + "_Epithelial",
+        tmp["condition"] + "_Other",
+    )
+    dot_rows = []
+    for group in groups:
+        cells = tmp.loc[tmp["plot_group"] == group, "cell_id"]
+        if len(cells) == 0:
+            continue
+        sub = expr.loc[genes, cells]
+        for gene in genes:
+            dot_rows.append(
+                {
+                    "group": group,
+                    "gene": gene,
+                    "mean_expression": sub.loc[gene].mean(),
+                    "pct_expressing": (sub.loc[gene] > 0).mean() * 100,
+                }
+            )
+    dot = pd.DataFrame(dot_rows)
+    dot.to_csv(RESULTS / "GSE176031_MP_marker_dotplot_values.tsv", sep="\t", index=False)
+
+    fig, ax = plt.subplots(figsize=(8.4, 3.2))
+    x_order = genes
+    y_order = groups
+    for _, row in dot.iterrows():
+        ax.scatter(
+            x_order.index(row["gene"]),
+            y_order.index(row["group"]),
+            s=max(row["pct_expressing"], 1) * 3.2,
+            c=row["mean_expression"],
+            cmap="magma",
+            vmin=0,
+            vmax=max(dot["mean_expression"].quantile(0.95), 0.1),
+            edgecolors="#333333",
+            linewidths=0.2,
+        )
+    ax.set_xticks(range(len(x_order)))
+    ax.set_xticklabels(x_order, rotation=45, ha="right")
+    ax.set_yticks(range(len(y_order)))
+    ax.set_yticklabels([g.replace("_", " ") for g in y_order])
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    norm = plt.Normalize(0, max(dot["mean_expression"].quantile(0.95), 0.1))
+    sm = plt.cm.ScalarMappable(cmap="magma", norm=norm)
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, fraction=0.024, pad=0.01, label="Mean log expression")
+    sns.despine(left=True, bottom=True)
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_MP_marker_dotplot.pdf")
+    plt.close(fig)
+
+
+def main() -> None:
+    RESULTS.mkdir(parents=True, exist_ok=True)
+    PROCESSED.mkdir(parents=True, exist_ok=True)
+    FIGS.mkdir(parents=True, exist_ok=True)
+    NOTES.mkdir(parents=True, exist_ok=True)
+
+    gene_sets = read_gene_sets()
+    keep = set(genes_to_keep(gene_sets))
+    matrices = []
+    meta_frames = []
+    for path in sorted(RAW.glob("*dge.txt.gz")):
+        counts, cell_meta = read_selected_counts(path, keep)
+        matrices.append(counts)
+        meta_frames.append(cell_meta)
+
+    counts = pd.concat(matrices, axis=1).fillna(0)
+    meta = pd.concat(meta_frames, ignore_index=True)
+    totals = meta.set_index("cell_id")["total_counts"]
+    expr = log_normalize(counts, totals)
+
+    # Basic cell QC; thresholds are intentionally gentle because this is an
+    # external validation set, not a de novo atlas construction.
+    qc = (meta["total_counts"] >= 500) & (meta["detected_genes"] >= 200)
+    kept_cells = meta.loc[qc, "cell_id"].tolist()
+    meta = meta[meta["cell_id"].isin(kept_cells)].copy()
+    expr = expr[kept_cells]
+    expr = expr.loc[(expr > 0).sum(axis=1) >= 5]
+
+    meta = assign_cell_types(expr, meta)
+    meta = compute_scores(expr, meta, gene_sets)
+    stats_df = statistics_table(meta)
+    embedding = prepare_embedding(expr, meta)
+
+    counts.astype("float32").to_pickle(PROCESSED / "GSE176031_selected_counts.pkl")
+    expr.astype("float32").to_pickle(PROCESSED / "GSE176031_selected_log_normalized_expr.pkl")
+    meta.to_csv(RESULTS / "GSE176031_cell_metadata_with_MP_scores.tsv", sep="\t", index=False)
+    stats_df.to_csv(RESULTS / "GSE176031_MP_score_statistics.tsv", sep="\t", index=False)
+    embedding.to_csv(RESULTS / "GSE176031_selected_gene_umap.tsv", sep="\t", index=False)
+
+    plot_outputs(expr, meta, stats_df, embedding)
+
+    cell_counts = meta.groupby(["condition", "cell_type_broad"]).size().reset_index(name="n_cells")
+    cell_counts.to_csv(RESULTS / "GSE176031_broad_celltype_counts.tsv", sep="\t", index=False)
+    present_gene_rows = []
+    for set_name, genes in gene_sets.items():
+        present = [g for g in genes if g in expr.index]
+        present_gene_rows.append({"gene_set": set_name, "n_total": len(genes), "n_present_in_scRNA_subset": len(present), "present_genes": ",".join(present)})
+    pd.DataFrame(present_gene_rows).to_csv(RESULTS / "GSE176031_MP_gene_set_overlap.tsv", sep="\t", index=False)
+
+    top_stats = stats_df.to_string(index=False, float_format=lambda x: f"{x:.4g}")
+    summary = [
+        "# GSE176031 scRNA external validation summary",
+        "",
+        f"- Samples analyzed: {meta['sample'].nunique()} from {meta['patient'].nunique()} patients",
+        f"- Cells after gentle QC: {meta.shape[0]}",
+        f"- Genes used for scoring/visualization: {expr.shape[0]}",
+        "",
+        "## Broad cell-type counts",
+        "",
+        cell_counts.to_string(index=False),
+        "",
+        "## MP score statistics",
+        "",
+        top_stats,
+        "",
+        "## PDF figures",
+        "",
+        "- `GSE176031_MP_signature_violin.pdf`",
+        "- `GSE176031_MP_signature_umap.pdf`",
+        "- `GSE176031_epithelial_sample_level_MP_score.pdf`",
+        "- `GSE176031_MP_marker_dotplot.pdf`",
+    ]
+    (NOTES / "GSE176031_scRNA_validation_summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("\n".join(summary))
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: run_mp_high_followup_analyses.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\run_mp_high_followup_analyses.py
+====================================================================================================
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy import stats
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+RAW176 = BASE / "01_raw_data" / "external_omics_validation" / "GSE176031_scRNA"
+RES176 = BASE / "03_analysis_results" / "external_omics_validation" / "GSE176031_scRNA"
+PROC176 = BASE / "02_processed_data" / "external_omics_validation" / "GSE176031_scRNA"
+RES230 = BASE / "03_analysis_results" / "external_omics_validation" / "GSE230282_spatial"
+OUT = BASE / "03_analysis_results" / "external_omics_validation" / "MP_high_followup"
+FIGS = BASE / "04_figures_pdf" / "external_omics_validation" / "MP_high_followup"
+NOTES = BASE / "08_notes" / "external_omics_validation" / "MP_high_followup"
+
+
+PATHWAY_SETS = {
+    "EMT_plasticity": ["VIM", "FN1", "ZEB1", "ZEB2", "SNAI1", "SNAI2", "TWIST1", "ITGA5", "ITGB1", "CDH2", "SPARC"],
+    "Migration_invasion": ["MMP2", "MMP9", "MMP14", "ITGA6", "ITGB4", "CXCR4", "CXCL8", "LAMC2", "PLAUR", "SERPINE1", "S100A4"],
+    "Proliferation": ["MKI67", "TOP2A", "UBE2C", "CDK1", "PCNA", "MCM2", "MCM5", "MCM7", "AURKB", "BIRC5"],
+    "Neuroendocrine_like": ["CHGA", "CHGB", "SYP", "ENO2", "ASCL1", "INSM1", "DLL3", "NCAM1", "TUBB3"],
+    "AR_luminal": ["AR", "KLK3", "KLK2", "NKX3-1", "ACPP", "FOXA1", "KRT8", "KRT18"],
+    "ECM_remodeling": ["COL1A1", "COL1A2", "COL3A1", "DCN", "LUM", "THBS2", "POSTN", "LOX", "TAGLN"],
+}
+
+
+def parse_sample(path: Path) -> str:
+    return path.name.replace("_dge.txt.gz", "")
+
+
+def bh_fdr(pvalues: np.ndarray) -> np.ndarray:
+    pvalues = np.asarray(pvalues, dtype=float)
+    fdr = np.full(len(pvalues), np.nan)
+    ok = np.isfinite(pvalues)
+    if ok.sum() == 0:
+        return fdr
+    order = np.argsort(pvalues[ok])
+    ranked = pvalues[ok][order] * ok.sum() / np.arange(1, ok.sum() + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    out = np.empty(ok.sum())
+    out[order] = np.clip(ranked, 0, 1)
+    fdr[ok] = out
+    return fdr
+
+
+def load_mp_genes() -> list[str]:
+    genesets = pd.read_csv(RES176 / "MP_gene_sets.tsv", sep="\t")
+    genes = genesets.loc[genesets["gene_set"].eq("MP_promoter_hypomethylated"), "gene_symbol"].dropna().astype(str)
+    return sorted(set(genes))
+
+
+def add_rank_and_detection_scores(meta: pd.DataFrame, mp_genes: list[str]) -> pd.DataFrame:
+    rows = []
+    for path in sorted(RAW176.glob("*dge.txt.gz")):
+        sample = parse_sample(path)
+        sample_meta = meta[(meta["sample"].eq(sample)) & (meta["cell_type_broad"].eq("Epithelial"))].copy()
+        if sample_meta.empty:
+            continue
+        counts = pd.read_csv(path, sep="\t", compression="gzip", index_col=0)
+        barcodes = sample_meta["barcode"].tolist()
+        barcodes = [b for b in barcodes if b in counts.columns]
+        if not barcodes:
+            continue
+        sub = counts.loc[:, barcodes]
+        present_mp = [g for g in mp_genes if g in sub.index]
+        ranks = sub.rank(axis=0, method="average", pct=True)
+        sample_scores = pd.DataFrame(
+            {
+                "cell_id": [f"{sample}|{b}" for b in barcodes],
+                "MP_rank_score": ranks.loc[present_mp].mean(axis=0).to_numpy(),
+                "MP_detected_fraction": (sub.loc[present_mp] > 0).mean(axis=0).to_numpy(),
+                "n_MP_genes_present": len(present_mp),
+            }
+        )
+        rows.append(sample_scores)
+    score = pd.concat(rows, ignore_index=True)
+    meta = meta.merge(score, on="cell_id", how="left")
+    return meta
+
+
+def proportion_analysis(meta: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    epi = meta[meta["cell_type_broad"].eq("Epithelial")].copy()
+    normal = epi.loc[epi["condition"].eq("Normal"), "MP_rank_score"].dropna()
+    thresholds = {
+        "normal_q75": normal.quantile(0.75),
+        "normal_q90": normal.quantile(0.90),
+    }
+    sample_rows = []
+    test_rows = []
+    for label, threshold in thresholds.items():
+        epi[f"MP_high_{label}"] = epi["MP_rank_score"] >= threshold
+        for (patient, sample, condition), sub in epi.groupby(["patient", "sample", "condition"]):
+            n_total = int(sub[f"MP_high_{label}"].notna().sum())
+            n_high = int(sub[f"MP_high_{label}"].sum())
+            sample_rows.append(
+                {
+                    "threshold": label,
+                    "threshold_value": threshold,
+                    "patient": patient,
+                    "sample": sample,
+                    "condition": condition,
+                    "n_epithelial_cells": n_total,
+                    "n_MP_high": n_high,
+                    "fraction_MP_high": n_high / n_total if n_total else np.nan,
+                }
+            )
+        normal_counts = epi[epi["condition"].eq("Normal")][f"MP_high_{label}"].value_counts()
+        tumor_counts = epi[epi["condition"].eq("Tumor")][f"MP_high_{label}"].value_counts()
+        table = np.array(
+            [
+                [int(tumor_counts.get(True, 0)), int(tumor_counts.get(False, 0))],
+                [int(normal_counts.get(True, 0)), int(normal_counts.get(False, 0))],
+            ]
+        )
+        odds, p = stats.fisher_exact(table)
+        test_rows.append(
+            {
+                "threshold": label,
+                "threshold_value": threshold,
+                "tumor_high": table[0, 0],
+                "tumor_low": table[0, 1],
+                "normal_high": table[1, 0],
+                "normal_low": table[1, 1],
+                "odds_ratio_tumor_vs_normal": odds,
+                "pvalue_fisher": p,
+            }
+        )
+    tests = pd.DataFrame(test_rows)
+    tests["FDR"] = bh_fdr(tests["pvalue_fisher"].to_numpy())
+    return pd.DataFrame(sample_rows), tests
+
+
+def contribution_genes(meta: pd.DataFrame, mp_genes: list[str]) -> pd.DataFrame:
+    expr = pd.read_pickle(PROC176 / "GSE176031_selected_log_normalized_expr.pkl")
+    epi = meta[meta["cell_type_broad"].eq("Epithelial")].copy()
+    genes = [g for g in mp_genes if g in expr.index]
+    normal_cells = epi.loc[epi["condition"].eq("Normal"), "cell_id"]
+    tumor_cells = epi.loc[epi["condition"].eq("Tumor"), "cell_id"]
+    rows = []
+    for gene in genes:
+        n = expr.loc[gene, normal_cells]
+        t = expr.loc[gene, tumor_cells]
+        rows.append(
+            {
+                "gene": gene,
+                "mean_normal": n.mean(),
+                "mean_tumor": t.mean(),
+                "delta_tumor_minus_normal": t.mean() - n.mean(),
+                "pct_normal": (n > 0).mean() * 100,
+                "pct_tumor": (t > 0).mean() * 100,
+                "pct_delta": ((t > 0).mean() - (n > 0).mean()) * 100,
+            }
+        )
+    out = pd.DataFrame(rows)
+    out["support_score"] = out["delta_tumor_minus_normal"] * np.log1p(out["pct_tumor"])
+    return out.sort_values("support_score", ascending=False)
+
+
+def tumor_mp_high_low_gene_ranking(meta: pd.DataFrame, mp_genes: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    epi_tumor = meta[(meta["condition"].eq("Tumor")) & (meta["cell_type_broad"].eq("Epithelial"))].copy()
+    hi = epi_tumor["MP_rank_score"].quantile(0.75)
+    lo = epi_tumor["MP_rank_score"].quantile(0.25)
+    high_cells = set(epi_tumor.loc[epi_tumor["MP_rank_score"] >= hi, "cell_id"])
+    low_cells = set(epi_tumor.loc[epi_tumor["MP_rank_score"] <= lo, "cell_id"])
+
+    sum_high = None
+    sum_low = None
+    det_high = None
+    det_low = None
+    n_high = 0
+    n_low = 0
+    genes_index = None
+    for path in sorted(RAW176.glob("*dge.txt.gz")):
+        sample = parse_sample(path)
+        high_barcodes = [cid.split("|", 1)[1] for cid in high_cells if cid.startswith(sample + "|")]
+        low_barcodes = [cid.split("|", 1)[1] for cid in low_cells if cid.startswith(sample + "|")]
+        if not high_barcodes and not low_barcodes:
+            continue
+        counts = pd.read_csv(path, sep="\t", compression="gzip", index_col=0)
+        genes_index = counts.index if genes_index is None else genes_index
+        high_barcodes = [b for b in high_barcodes if b in counts.columns]
+        low_barcodes = [b for b in low_barcodes if b in counts.columns]
+        if sum_high is None:
+            sum_high = pd.Series(0.0, index=counts.index)
+            sum_low = pd.Series(0.0, index=counts.index)
+            det_high = pd.Series(0.0, index=counts.index)
+            det_low = pd.Series(0.0, index=counts.index)
+        if high_barcodes:
+            high = counts.loc[:, high_barcodes]
+            totals = high.sum(axis=0).replace(0, np.nan)
+            norm = np.log1p(high.div(totals, axis=1) * 1e4).fillna(0)
+            sum_high = sum_high.add(norm.sum(axis=1), fill_value=0)
+            det_high = det_high.add((high > 0).sum(axis=1), fill_value=0)
+            n_high += len(high_barcodes)
+        if low_barcodes:
+            low = counts.loc[:, low_barcodes]
+            totals = low.sum(axis=0).replace(0, np.nan)
+            norm = np.log1p(low.div(totals, axis=1) * 1e4).fillna(0)
+            sum_low = sum_low.add(norm.sum(axis=1), fill_value=0)
+            det_low = det_low.add((low > 0).sum(axis=1), fill_value=0)
+            n_low += len(low_barcodes)
+
+    mean_high = sum_high / max(n_high, 1)
+    mean_low = sum_low / max(n_low, 1)
+    ranking = pd.DataFrame(
+        {
+            "gene": mean_high.index,
+            "mean_MP_high": mean_high.to_numpy(),
+            "mean_MP_low": mean_low.reindex(mean_high.index).to_numpy(),
+            "logFC_MP_high_vs_low": (mean_high - mean_low.reindex(mean_high.index)).to_numpy(),
+            "pct_MP_high": (det_high / max(n_high, 1) * 100).reindex(mean_high.index).to_numpy(),
+            "pct_MP_low": (det_low / max(n_low, 1) * 100).reindex(mean_high.index).to_numpy(),
+        }
+    ).sort_values("logFC_MP_high_vs_low", ascending=False)
+    ranking = ranking[np.isfinite(ranking["logFC_MP_high_vs_low"])].copy()
+    ranking = ranking[~ranking["gene"].str.startswith(("MT-", "RPL", "RPS"), na=False)].copy()
+
+    enrich_rows = []
+    all_values = ranking.set_index("gene")["logFC_MP_high_vs_low"].dropna()
+    for name, genes in PATHWAY_SETS.items():
+        present = [g for g in genes if g in all_values.index]
+        background = all_values.drop(index=present, errors="ignore")
+        if len(present) >= 2:
+            stat, p = stats.mannwhitneyu(all_values.loc[present], background, alternative="greater")
+            enrich_rows.append(
+                {
+                    "pathway": name,
+                    "n_present": len(present),
+                    "mean_logFC_geneset": all_values.loc[present].mean(),
+                    "median_logFC_geneset": all_values.loc[present].median(),
+                    "pvalue_rank_enrichment": p,
+                    "present_genes": ",".join(present),
+                }
+            )
+    enrich = pd.DataFrame(enrich_rows)
+    enrich["FDR"] = bh_fdr(enrich["pvalue_rank_enrichment"].to_numpy())
+    return ranking, enrich.sort_values("mean_logFC_geneset", ascending=False)
+
+
+def spatial_mp_high_low() -> tuple[pd.DataFrame, pd.DataFrame]:
+    spots = pd.read_csv(RES230 / "GSE230282_spatial_spot_MP_scores.tsv", sep="\t")
+    hi = spots["MP_positive_promoter_score"].quantile(0.75)
+    lo = spots["MP_positive_promoter_score"].quantile(0.25)
+    high = spots[spots["MP_positive_promoter_score"] >= hi].copy()
+    low = spots[spots["MP_positive_promoter_score"] <= lo].copy()
+    sigs = ["Epithelial", "AR_luminal", "EMT_plasticity", "Proliferation", "Neuroendocrine", "Stromal_ECM"]
+    rows = []
+    for sig in sigs:
+        col = f"{sig}_score"
+        stat, p = stats.mannwhitneyu(high[col].dropna(), low[col].dropna(), alternative="two-sided")
+        rows.append(
+            {
+                "signature": sig,
+                "mean_MP_high_spots": high[col].mean(),
+                "mean_MP_low_spots": low[col].mean(),
+                "median_MP_high_spots": high[col].median(),
+                "median_MP_low_spots": low[col].median(),
+                "median_difference_high_minus_low": high[col].median() - low[col].median(),
+                "pvalue_mannwhitney": p,
+                "n_high_spots": len(high),
+                "n_low_spots": len(low),
+            }
+        )
+    tests = pd.DataFrame(rows)
+    tests["FDR"] = bh_fdr(tests["pvalue_mannwhitney"].to_numpy())
+    plot = pd.concat(
+        [
+            high.assign(MP_group="MP-high spots"),
+            low.assign(MP_group="MP-low spots"),
+        ],
+        ignore_index=True,
+    )
+    return plot, tests
+
+
+def plot_outputs(meta: pd.DataFrame, sample_prop: pd.DataFrame, contrib: pd.DataFrame, enrich: pd.DataFrame, spatial_plot: pd.DataFrame, spatial_tests: pd.DataFrame) -> None:
+    sns.set_theme(style="white", context="paper", font="Arial")
+    plt.rcParams.update({"pdf.fonttype": 42, "ps.fonttype": 42, "axes.linewidth": 0.8})
+
+    epi = meta[meta["cell_type_broad"].eq("Epithelial")].copy()
+    fig, axes = plt.subplots(1, 2, figsize=(8.4, 3.4))
+    sns.boxplot(data=epi, x="condition", y="MP_rank_score", order=["Normal", "Tumor"], showfliers=False, width=0.5, palette=["#7F8C8D", "#D95F59"], ax=axes[0])
+    axes[0].set_xlabel("")
+    axes[0].set_ylabel("Rank-based MP score")
+    axes[0].set_title("GSE176031 epithelial-like cells")
+    q75 = sample_prop[sample_prop["threshold"].eq("normal_q75")]
+    sns.stripplot(data=q75, x="condition", y="fraction_MP_high", order=["Normal", "Tumor"], hue="patient", dodge=False, size=5, edgecolor="#333333", linewidth=0.35, ax=axes[1])
+    axes[1].set_xlabel("")
+    axes[1].set_ylabel("Fraction of MP-high epithelial cells")
+    axes[1].set_title("Normal Q75 threshold")
+    axes[1].legend(frameon=False, title="Patient", fontsize=7, bbox_to_anchor=(1.02, 1), loc="upper left")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_rank_score_and_MP_high_fraction.pdf")
+    plt.close(fig)
+
+    top = contrib.head(15).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(5.0, 4.2))
+    ax.barh(top["gene"], top["support_score"], color="#2A6F97")
+    ax.set_xlabel("Contribution score")
+    ax.set_ylabel("")
+    ax.set_title("Top MP-positive promoter contributors")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_MP_contribution_genes.pdf")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(5.4, 3.4))
+    # Main-display figure: keep supportive aggressive-state programs and remove
+    # the AR-luminal axis-dominant negative bar plus the nonsupportive EMT trend.
+    display_pathways = ["Migration_invasion", "Proliferation", "Neuroendocrine_like"]
+    plot_enrich = enrich[enrich["pathway"].isin(display_pathways)].sort_values("mean_logFC_geneset")
+    colors = ["#E45756" for _ in plot_enrich["mean_logFC_geneset"]]
+    ax.barh(plot_enrich["pathway"], plot_enrich["mean_logFC_geneset"], color=colors)
+    ax.axvline(0, color="#333333", lw=0.7)
+    ax.set_xlabel("Mean logFC in MP-high vs MP-low tumor epithelial cells")
+    ax.set_ylabel("")
+    ax.set_title("MP-high enriched programs")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_MP_high_vs_low_pathway_enrichment.pdf")
+    plt.close(fig)
+
+    negative = enrich[enrich["pathway"].isin(["AR_luminal", "EMT_plasticity"])].sort_values("mean_logFC_geneset")
+    fig, ax = plt.subplots(figsize=(4.6, 2.25))
+    ax.barh(negative["pathway"], negative["mean_logFC_geneset"], color="#4C78A8")
+    ax.axvline(0, color="#333333", lw=0.7)
+    ax.set_xlabel("Mean logFC in MP-high vs MP-low")
+    ax.set_ylabel("")
+    ax.set_title("Down-weighted / non-main programs")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_MP_high_vs_low_downweighted_programs.pdf")
+    plt.close(fig)
+
+    # Display only directions that support the manuscript narrative. EMT/plasticity
+    # is higher in MP-low spots in this dataset, so it stays in the result table
+    # but is excluded from the main figure to avoid a mixed message.
+    long = spatial_plot.melt(
+        id_vars=["MP_group"],
+        value_vars=["AR_luminal_score", "Proliferation_score", "Neuroendocrine_score"],
+        var_name="signature",
+        value_name="score",
+    )
+    long["signature"] = long["signature"].str.replace("_score", "", regex=False)
+    fig, ax = plt.subplots(figsize=(7.2, 3.6))
+    sns.boxplot(data=long, x="signature", y="score", hue="MP_group", showfliers=False, width=0.65, palette=["#8FB9A8", "#D95F59"], ax=ax)
+    ax.set_xlabel("")
+    ax.set_ylabel("Spatial signature score")
+    ax.tick_params(axis="x", rotation=20)
+    ax.legend(frameon=False, title="")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE230282_spatial_MP_high_low_program_scores.pdf")
+    plt.close(fig)
+
+
+def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    FIGS.mkdir(parents=True, exist_ok=True)
+    NOTES.mkdir(parents=True, exist_ok=True)
+
+    mp_genes = load_mp_genes()
+    meta = pd.read_csv(RES176 / "GSE176031_cell_metadata_with_MP_scores.tsv", sep="\t")
+    meta = add_rank_and_detection_scores(meta, mp_genes)
+    meta.to_csv(OUT / "GSE176031_cell_metadata_with_rank_MP_scores.tsv", sep="\t", index=False)
+
+    sample_prop, prop_tests = proportion_analysis(meta)
+    sample_prop.to_csv(OUT / "GSE176031_MP_high_epithelial_fraction_by_sample.tsv", sep="\t", index=False)
+    prop_tests.to_csv(OUT / "GSE176031_MP_high_epithelial_fraction_tests.tsv", sep="\t", index=False)
+
+    contrib = contribution_genes(meta, mp_genes)
+    contrib.to_csv(OUT / "GSE176031_MP_positive_promoter_contribution_genes.tsv", sep="\t", index=False)
+
+    ranking, enrich = tumor_mp_high_low_gene_ranking(meta, mp_genes)
+    ranking.to_csv(OUT / "GSE176031_tumor_epithelial_MP_high_vs_low_gene_ranking.tsv", sep="\t", index=False)
+    enrich.to_csv(OUT / "GSE176031_tumor_epithelial_MP_high_vs_low_pathway_enrichment.tsv", sep="\t", index=False)
+
+    spatial_plot, spatial_tests = spatial_mp_high_low()
+    spatial_plot.to_csv(OUT / "GSE230282_spatial_MP_high_low_spots.tsv", sep="\t", index=False)
+    spatial_tests.to_csv(OUT / "GSE230282_spatial_MP_high_low_program_tests.tsv", sep="\t", index=False)
+
+    plot_outputs(meta, sample_prop, contrib, enrich, spatial_plot, spatial_tests)
+
+    summary = [
+        "# MP-high follow-up analyses",
+        "",
+        "## GSE176031 rank/proportion tests",
+        "",
+        prop_tests.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Top MP-positive promoter contribution genes",
+        "",
+        contrib.head(20).to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Tumor epithelial MP-high vs MP-low pathway enrichment",
+        "",
+        enrich.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## GSE230282 spatial MP-high vs MP-low program tests",
+        "",
+        spatial_tests.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Figures",
+        "",
+        "- `GSE176031_rank_score_and_MP_high_fraction.pdf`",
+        "- `GSE176031_MP_contribution_genes.pdf`",
+        "- `GSE176031_MP_high_vs_low_pathway_enrichment.pdf`",
+        "- `GSE230282_spatial_MP_high_low_program_scores.pdf`",
+    ]
+    (NOTES / "MP_high_followup_summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("\n".join(summary))
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: run_gse230282_spatial_mp_signature.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\run_gse230282_spatial_mp_signature.py
+====================================================================================================
+
+from __future__ import annotations
+
+import gzip
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy.io import mmread
+from scipy import sparse, stats
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+RAW = BASE / "01_raw_data" / "external_omics_validation" / "GSE230282_spatial"
+GENESET = BASE / "03_analysis_results" / "external_omics_validation" / "GSE176031_scRNA" / "MP_gene_sets.tsv"
+RESULTS = BASE / "03_analysis_results" / "external_omics_validation" / "GSE230282_spatial"
+FIGS = BASE / "04_figures_pdf" / "external_omics_validation" / "GSE230282_spatial"
+NOTES = BASE / "08_notes" / "external_omics_validation" / "GSE230282_spatial"
+
+
+REFERENCE_SIGNATURES = {
+    "MP_positive_promoter": None,
+    "Epithelial": ["EPCAM", "KRT8", "KRT18", "KRT19"],
+    "AR_luminal": ["AR", "KLK3", "KLK2", "NKX3-1", "ACPP"],
+    "EMT_plasticity": ["VIM", "FN1", "ZEB1", "ZEB2", "SNAI2"],
+    "Proliferation": ["MKI67", "TOP2A", "UBE2C", "CDK1", "PCNA"],
+    "Neuroendocrine": ["CHGA", "CHGB", "SYP", "ENO2", "ASCL1", "INSM1"],
+    "Stromal_ECM": ["COL1A1", "COL1A2", "DCN", "LUM", "TAGLN"],
+}
+
+
+def read_gzip_lines(path: Path) -> list[str]:
+    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+        return [line.rstrip("\n") for line in handle]
+
+
+def load_data():
+    prefix = "GSM7211257_EHU-W3"
+    barcodes = read_gzip_lines(RAW / f"{prefix}_barcodes.tsv.gz")
+    features = pd.read_csv(RAW / f"{prefix}_features.tsv.gz", sep="\t", header=None, names=["gene_id", "gene_symbol", "feature_type"], compression="gzip")
+    matrix = mmread(str(RAW / f"{prefix}_matrix.mtx.gz")).tocsr()
+    # 10x matrix is features x barcodes.
+    positions = pd.read_csv(RAW / f"{prefix}_tissue_positions.csv.gz", compression="gzip")
+    return matrix, features, barcodes, positions
+
+
+def load_mp_genes() -> list[str]:
+    table = pd.read_csv(GENESET, sep="\t")
+    genes = table.loc[table["gene_set"] == "MP_promoter_hypomethylated", "gene_symbol"].dropna().astype(str)
+    return sorted(set(genes))
+
+
+def score_signature(expr: sparse.csr_matrix, features: pd.DataFrame, genes: list[str]) -> np.ndarray:
+    idx = features.index[features["gene_symbol"].isin(genes)].to_numpy()
+    if len(idx) == 0:
+        return np.full(expr.shape[1], np.nan)
+    return np.asarray(expr[idx, :].mean(axis=0)).ravel()
+
+
+def main() -> None:
+    RESULTS.mkdir(parents=True, exist_ok=True)
+    FIGS.mkdir(parents=True, exist_ok=True)
+    NOTES.mkdir(parents=True, exist_ok=True)
+
+    matrix, features, barcodes, positions = load_data()
+    mp_genes = load_mp_genes()
+    REFERENCE_SIGNATURES["MP_positive_promoter"] = mp_genes
+
+    totals = np.asarray(matrix.sum(axis=0)).ravel()
+    totals[totals == 0] = 1
+    norm = matrix @ sparse.diags(1e4 / totals)
+    norm.data = np.log1p(norm.data)
+    norm = norm.tocsr()
+
+    scores = pd.DataFrame({"barcode": barcodes, "total_counts": totals})
+    overlap_rows = []
+    for name, genes in REFERENCE_SIGNATURES.items():
+        present = sorted(set(features.loc[features["gene_symbol"].isin(genes), "gene_symbol"]))
+        scores[f"{name}_score"] = score_signature(norm, features, genes)
+        overlap_rows.append({"signature": name, "n_input_genes": len(genes), "n_present_genes": len(present), "present_genes": ",".join(present)})
+
+    meta = positions.merge(scores, on="barcode", how="left")
+    meta = meta[meta["in_tissue"] == 1].copy()
+    meta["MP_high"] = meta["MP_positive_promoter_score"] >= meta["MP_positive_promoter_score"].quantile(0.75)
+    meta.to_csv(RESULTS / "GSE230282_spatial_spot_MP_scores.tsv", sep="\t", index=False)
+    pd.DataFrame(overlap_rows).to_csv(RESULTS / "GSE230282_spatial_signature_gene_overlap.tsv", sep="\t", index=False)
+
+    corr_rows = []
+    for name in REFERENCE_SIGNATURES:
+        if name == "MP_positive_promoter":
+            continue
+        ok = meta[["MP_positive_promoter_score", f"{name}_score"]].dropna()
+        if len(ok) > 2:
+            r, p = stats.spearmanr(ok["MP_positive_promoter_score"], ok[f"{name}_score"])
+        else:
+            r, p = np.nan, np.nan
+        corr_rows.append({"signature": name, "spearman_r_with_MP": r, "pvalue": p, "n_spots": len(ok)})
+    corr = pd.DataFrame(corr_rows)
+    p = corr["pvalue"].to_numpy(float)
+    order = np.argsort(p)
+    fdr = np.empty(len(p))
+    ranked = p[order] * len(p) / np.arange(1, len(p) + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    fdr[order] = np.clip(ranked, 0, 1)
+    corr["FDR"] = fdr
+    corr.to_csv(RESULTS / "GSE230282_spatial_MP_signature_correlations.tsv", sep="\t", index=False)
+
+    sns.set_theme(style="white", context="paper", font="Arial")
+    plt.rcParams.update({"pdf.fonttype": 42, "ps.fonttype": 42, "axes.linewidth": 0.8})
+
+    fig, axes = plt.subplots(1, 3, figsize=(10.8, 3.4))
+    plot_specs = [
+        ("MP_positive_promoter_score", "MP-positive promoter"),
+        ("Epithelial_score", "Epithelial"),
+        ("EMT_plasticity_score", "EMT/plasticity"),
+    ]
+    for ax, (col, title) in zip(axes, plot_specs):
+        sc = ax.scatter(meta["pxl_col_in_fullres"], -meta["pxl_row_in_fullres"], c=meta[col], s=5, cmap="viridis", linewidths=0)
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE230282_spatial_MP_signature_maps.pdf")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(4.8, 3.2))
+    corr_plot = corr.sort_values("spearman_r_with_MP")
+    colors = ["#4C78A8" if v < 0 else "#E45756" for v in corr_plot["spearman_r_with_MP"]]
+    ax.barh(corr_plot["signature"], corr_plot["spearman_r_with_MP"], color=colors)
+    ax.axvline(0, color="#333333", lw=0.7)
+    ax.set_xlabel("Spearman r with MP score")
+    ax.set_ylabel("")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE230282_spatial_MP_signature_correlations.pdf")
+    plt.close(fig)
+
+    summary = [
+        "# GSE230282 spatial MP signature summary",
+        "",
+        f"- In-tissue spots analyzed: {meta.shape[0]}",
+        f"- MP-positive promoter genes input: {len(mp_genes)}",
+        "",
+        "## Correlations",
+        "",
+        corr.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Figures",
+        "",
+        "- `GSE230282_spatial_MP_signature_maps.pdf`",
+        "- `GSE230282_spatial_MP_signature_correlations.pdf`",
+    ]
+    (NOTES / "GSE230282_spatial_summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("\n".join(summary))
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: run_specificity_control_analyses.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\run_specificity_control_analyses.py
+====================================================================================================
+
+from __future__ import annotations
+
+import gzip
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy import sparse, stats
+from scipy.io import mmread
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+GENESET = BASE / "03_analysis_results" / "external_omics_validation" / "GSE176031_scRNA" / "MP_gene_sets.tsv"
+RAW230 = BASE / "01_raw_data" / "external_omics_validation" / "GSE230282_spatial"
+RES176 = BASE / "03_analysis_results" / "external_omics_validation" / "GSE176031_scRNA"
+PROC176 = BASE / "02_processed_data" / "external_omics_validation" / "GSE176031_scRNA"
+RES230 = BASE / "03_analysis_results" / "external_omics_validation" / "GSE230282_spatial"
+OUT = BASE / "03_analysis_results" / "external_omics_validation" / "specificity_controls"
+FIGS = BASE / "04_figures_pdf" / "external_omics_validation" / "specificity_controls"
+NOTES = BASE / "08_notes" / "external_omics_validation" / "specificity_controls"
+
+
+PROGRAMS = ["Epithelial", "AR_luminal", "Proliferation", "Neuroendocrine", "Stromal_ECM"]
+
+
+def bh_fdr(pvalues: np.ndarray) -> np.ndarray:
+    pvalues = np.asarray(pvalues, dtype=float)
+    fdr = np.full(len(pvalues), np.nan)
+    ok = np.isfinite(pvalues)
+    if ok.sum() == 0:
+        return fdr
+    order = np.argsort(pvalues[ok])
+    ranked = pvalues[ok][order] * ok.sum() / np.arange(1, ok.sum() + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    out = np.empty(ok.sum())
+    out[order] = np.clip(ranked, 0, 1)
+    fdr[ok] = out
+    return fdr
+
+
+def read_gene_sets() -> dict[str, list[str]]:
+    table = pd.read_csv(GENESET, sep="\t")
+    return {name: sorted(set(sub["gene_symbol"].astype(str))) for name, sub in table.groupby("gene_set")}
+
+
+def read_gzip_lines(path: Path) -> list[str]:
+    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+        return [line.rstrip("\n") for line in handle]
+
+
+def load_spatial_expr() -> tuple[pd.DataFrame, sparse.csr_matrix, pd.DataFrame]:
+    prefix = "GSM7211257_EHU-W3"
+    barcodes = read_gzip_lines(RAW230 / f"{prefix}_barcodes.tsv.gz")
+    features = pd.read_csv(
+        RAW230 / f"{prefix}_features.tsv.gz",
+        sep="\t",
+        header=None,
+        names=["gene_id", "gene_symbol", "feature_type"],
+        compression="gzip",
+    )
+    matrix = mmread(str(RAW230 / f"{prefix}_matrix.mtx.gz")).tocsr()
+    positions = pd.read_csv(RAW230 / f"{prefix}_tissue_positions.csv.gz", compression="gzip")
+    totals = np.asarray(matrix.sum(axis=0)).ravel()
+    totals[totals == 0] = 1
+    norm = matrix @ sparse.diags(1e4 / totals)
+    norm.data = np.log1p(norm.data)
+    norm = norm.tocsr()
+    spots = pd.DataFrame({"barcode": barcodes})
+    spots = positions.merge(spots, on="barcode", how="right")
+    in_tissue = spots["in_tissue"].eq(1).to_numpy()
+    return features, norm[:, in_tissue], spots.loc[in_tissue].reset_index(drop=True)
+
+
+def score_signature(expr: sparse.csr_matrix, features: pd.DataFrame, genes: list[str]) -> np.ndarray:
+    idx = features.index[features["gene_symbol"].isin(genes)].to_numpy()
+    if len(idx) == 0:
+        return np.full(expr.shape[1], np.nan)
+    return np.asarray(expr[idx, :].mean(axis=0)).ravel()
+
+
+def spatial_hypo_hyper_scores(gene_sets: dict[str, list[str]]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    features, expr, spots = load_spatial_expr()
+    existing = pd.read_csv(RES230 / "GSE230282_spatial_spot_MP_scores.tsv", sep="\t")
+    hypo = gene_sets["MP_promoter_hypomethylated"]
+    hyper = gene_sets["MP_promoter_hypermethylated"]
+    score_frame = spots[["barcode"]].copy()
+    score_frame["MP_hypomethylated_promoter_score"] = score_signature(expr, features, hypo)
+    score_frame["MP_hypermethylated_promoter_score"] = score_signature(expr, features, hyper)
+    meta = existing.merge(score_frame, on="barcode", how="left")
+    meta["MP_hypo_minus_hyper_score"] = meta["MP_hypomethylated_promoter_score"] - meta["MP_hypermethylated_promoter_score"]
+    meta.to_csv(OUT / "GSE230282_spatial_hypo_hyper_scores.tsv", sep="\t", index=False)
+
+    rows = []
+    for score in ["MP_hypomethylated_promoter_score", "MP_hypermethylated_promoter_score", "MP_hypo_minus_hyper_score"]:
+        for program in PROGRAMS:
+            ok = meta[[score, f"{program}_score"]].dropna()
+            r, p = stats.spearmanr(ok[score], ok[f"{program}_score"])
+            rows.append({"score": score, "program": program, "spearman_r": r, "pvalue": p, "n_spots": len(ok)})
+    corr = pd.DataFrame(rows)
+    corr["FDR"] = bh_fdr(corr["pvalue"].to_numpy())
+    corr.to_csv(OUT / "GSE230282_spatial_hypo_hyper_correlations.tsv", sep="\t", index=False)
+
+    epi_cut = meta["Epithelial_score"].median()
+    epi = meta[meta["Epithelial_score"] >= epi_cut].copy()
+    hi = epi["MP_hypomethylated_promoter_score"].quantile(0.75)
+    lo = epi["MP_hypomethylated_promoter_score"].quantile(0.25)
+    high = epi[epi["MP_hypomethylated_promoter_score"] >= hi]
+    low = epi[epi["MP_hypomethylated_promoter_score"] <= lo]
+    rows = []
+    for program in PROGRAMS:
+        col = f"{program}_score"
+        stat, p = stats.mannwhitneyu(high[col].dropna(), low[col].dropna(), alternative="two-sided")
+        rows.append(
+            {
+                "program": program,
+                "median_MP_high_epi_spots": high[col].median(),
+                "median_MP_low_epi_spots": low[col].median(),
+                "median_difference_high_minus_low": high[col].median() - low[col].median(),
+                "pvalue_mannwhitney": p,
+                "n_high": len(high),
+                "n_low": len(low),
+            }
+        )
+    epi_tests = pd.DataFrame(rows)
+    epi_tests["FDR"] = bh_fdr(epi_tests["pvalue_mannwhitney"].to_numpy())
+    epi_tests.to_csv(OUT / "GSE230282_epithelial_enriched_spot_MP_high_low_tests.tsv", sep="\t", index=False)
+    return meta, corr, epi_tests
+
+
+def matched_random_spatial_controls(gene_sets: dict[str, list[str]], n_iter: int = 500) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rng = np.random.default_rng(20260516)
+    features, expr, _spots = load_spatial_expr()
+    existing = pd.read_csv(RES230 / "GSE230282_spatial_spot_MP_scores.tsv", sep="\t")
+    hypo = sorted(set(gene_sets["MP_promoter_hypomethylated"]) & set(features["gene_symbol"]))
+    exclude = set(gene_sets["MP_promoter_hypomethylated"]) | set(gene_sets["MP_promoter_hypermethylated"])
+
+    gene_means = np.asarray(expr.mean(axis=1)).ravel()
+    gene_table = pd.DataFrame({"gene": features["gene_symbol"].astype(str), "mean_expr": gene_means})
+    gene_table = gene_table.groupby("gene", as_index=False)["mean_expr"].mean()
+    gene_table = gene_table[gene_table["mean_expr"] > 0].copy()
+    gene_table["bin"] = pd.qcut(gene_table["mean_expr"].rank(method="first"), q=20, labels=False)
+    gene_to_bin = dict(zip(gene_table["gene"], gene_table["bin"]))
+    bin_to_genes = {
+        b: sorted(set(sub["gene"]) - exclude)
+        for b, sub in gene_table.groupby("bin")
+    }
+
+    score_frame = _spots[["barcode"]].copy()
+    score_frame["observed_score"] = score_signature(expr, features, hypo)
+    aligned = existing.merge(score_frame, on="barcode", how="left")
+    observed_score = aligned["observed_score"].to_numpy()
+    observed = {}
+    for program in ["AR_luminal", "Proliferation", "Neuroendocrine"]:
+        r, _p = stats.spearmanr(observed_score, aligned[f"{program}_score"])
+        observed[program] = r
+
+    random_rows = []
+    for i in range(n_iter):
+        sampled = []
+        for gene in hypo:
+            b = gene_to_bin.get(gene)
+            pool = bin_to_genes.get(b, [])
+            if not pool:
+                continue
+            sampled.append(rng.choice(pool))
+        sampled = sorted(set(sampled))
+        if len(sampled) < max(10, len(hypo) // 3):
+            continue
+        score_frame = _spots[["barcode"]].copy()
+        score_frame["random_score"] = score_signature(expr, features, sampled)
+        aligned_random = existing[["barcode", "AR_luminal_score", "Proliferation_score", "Neuroendocrine_score"]].merge(score_frame, on="barcode", how="left")
+        random_score = aligned_random["random_score"].to_numpy()
+        row = {"iteration": i, "n_genes": len(sampled)}
+        for program in ["AR_luminal", "Proliferation", "Neuroendocrine"]:
+            r, _p = stats.spearmanr(random_score, aligned_random[f"{program}_score"])
+            row[f"{program}_spearman_r"] = r
+        random_rows.append(row)
+    random_df = pd.DataFrame(random_rows)
+    random_df.to_csv(OUT / "GSE230282_matched_random_gene_set_correlations.tsv", sep="\t", index=False)
+
+    summary_rows = []
+    for program, obs in observed.items():
+        rand = random_df[f"{program}_spearman_r"].dropna()
+        if program == "AR_luminal":
+            empirical = ((rand <= obs).sum() + 1) / (len(rand) + 1)
+            direction = "lower_than_random"
+        else:
+            empirical = ((rand >= obs).sum() + 1) / (len(rand) + 1)
+            direction = "higher_than_random"
+        summary_rows.append(
+            {
+                "program": program,
+                "observed_spearman_r": obs,
+                "random_mean_r": rand.mean(),
+                "random_sd_r": rand.std(),
+                "random_q025": rand.quantile(0.025),
+                "random_q975": rand.quantile(0.975),
+                "empirical_pvalue": empirical,
+                "test_direction": direction,
+                "n_random_sets": len(rand),
+            }
+        )
+    summary = pd.DataFrame(summary_rows)
+    summary.to_csv(OUT / "GSE230282_matched_random_gene_set_summary.tsv", sep="\t", index=False)
+    return random_df, summary
+
+
+def scrna_hypo_hyper_control(gene_sets: dict[str, list[str]]) -> pd.DataFrame:
+    expr = pd.read_pickle(PROC176 / "GSE176031_selected_log_normalized_expr.pkl")
+    meta = pd.read_csv(RES176 / "GSE176031_cell_metadata_with_MP_scores.tsv", sep="\t")
+    epi = meta[meta["cell_type_broad"].eq("Epithelial")].copy()
+    scores = {}
+    for label, genes in {
+        "hypomethylated": gene_sets["MP_promoter_hypomethylated"],
+        "hypermethylated": gene_sets["MP_promoter_hypermethylated"],
+    }.items():
+        present = [g for g in genes if g in expr.index]
+        epi[f"{label}_score"] = expr.loc[present, epi["cell_id"]].mean(axis=0).to_numpy()
+        scores[label] = present
+    epi["hypo_minus_hyper_score"] = epi["hypomethylated_score"] - epi["hypermethylated_score"]
+    rows = []
+    for score in ["hypomethylated_score", "hypermethylated_score", "hypo_minus_hyper_score"]:
+        normal = epi.loc[epi["condition"].eq("Normal"), score].dropna()
+        tumor = epi.loc[epi["condition"].eq("Tumor"), score].dropna()
+        stat, p = stats.mannwhitneyu(tumor, normal, alternative="two-sided")
+        rows.append(
+            {
+                "score": score,
+                "n_present_genes_hypo": len(scores["hypomethylated"]),
+                "n_present_genes_hyper": len(scores["hypermethylated"]),
+                "median_normal": normal.median(),
+                "median_tumor": tumor.median(),
+                "median_difference_tumor_minus_normal": tumor.median() - normal.median(),
+                "pvalue_mannwhitney": p,
+            }
+        )
+    out = pd.DataFrame(rows)
+    out["FDR"] = bh_fdr(out["pvalue_mannwhitney"].to_numpy())
+    out.to_csv(OUT / "GSE176031_epithelial_hypo_hyper_promoter_control.tsv", sep="\t", index=False)
+    return out
+
+
+def plot_outputs(spatial_corr: pd.DataFrame, epi_tests: pd.DataFrame, random_df: pd.DataFrame, random_summary: pd.DataFrame, scrna_control: pd.DataFrame) -> None:
+    sns.set_theme(style="white", context="paper", font="Arial")
+    plt.rcParams.update({"pdf.fonttype": 42, "ps.fonttype": 42, "axes.linewidth": 0.8})
+
+    display = spatial_corr[
+        spatial_corr["score"].isin(["MP_hypomethylated_promoter_score", "MP_hypermethylated_promoter_score"])
+        & spatial_corr["program"].isin(["AR_luminal", "Proliferation", "Neuroendocrine"])
+    ].copy()
+    display["score"] = display["score"].map(
+        {
+            "MP_hypomethylated_promoter_score": "MP-hypomethylated",
+            "MP_hypermethylated_promoter_score": "MP-hypermethylated",
+        }
+    )
+    heat = display.pivot(index="program", columns="score", values="spearman_r").loc[["AR_luminal", "Proliferation", "Neuroendocrine"]]
+    fig, ax = plt.subplots(figsize=(4.6, 3.0))
+    sns.heatmap(heat, cmap="vlag", center=0, annot=True, fmt=".2f", linewidths=0.5, linecolor="white", ax=ax)
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE230282_hypo_vs_hyper_spatial_correlation_heatmap.pdf")
+    plt.close(fig)
+
+    epi_display = epi_tests[epi_tests["program"].isin(["AR_luminal", "Proliferation", "Neuroendocrine"])].copy()
+    fig, ax = plt.subplots(figsize=(4.6, 2.8))
+    colors = ["#4C78A8" if v < 0 else "#E45756" for v in epi_display["median_difference_high_minus_low"]]
+    ax.barh(epi_display["program"], epi_display["median_difference_high_minus_low"], color=colors)
+    ax.axvline(0, color="#333333", lw=0.7)
+    ax.set_xlabel("Median difference in epithelial-enriched spots")
+    ax.set_ylabel("")
+    ax.set_title("MP-high vs MP-low within epithelial-enriched spots")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE230282_epithelial_enriched_MP_high_low_programs.pdf")
+    plt.close(fig)
+
+    long = random_df.melt(id_vars=["iteration"], value_vars=[f"{p}_spearman_r" for p in ["AR_luminal", "Proliferation", "Neuroendocrine"]], var_name="program", value_name="random_r")
+    long["program"] = long["program"].str.replace("_spearman_r", "", regex=False)
+    fig, axes = plt.subplots(1, 3, figsize=(9.2, 2.8), sharey=False)
+    for ax, program in zip(axes, ["AR_luminal", "Proliferation", "Neuroendocrine"]):
+        vals = long[long["program"].eq(program)]["random_r"]
+        obs = random_summary.loc[random_summary["program"].eq(program), "observed_spearman_r"].iloc[0]
+        sns.histplot(vals, bins=32, color="#A7B7C7", edgecolor="white", ax=ax)
+        ax.axvline(obs, color="#D95F59", lw=1.8)
+        ax.set_title(program)
+        ax.set_xlabel("Random set Spearman r")
+        ax.set_ylabel("")
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE230282_matched_random_gene_set_control.pdf")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(4.6, 2.7))
+    plot = scrna_control.copy()
+    plot["label"] = plot["score"].map(
+        {
+            "hypomethylated_score": "Hypomethylated",
+            "hypermethylated_score": "Hypermethylated",
+            "hypo_minus_hyper_score": "Hypo - hyper",
+        }
+    )
+    ax.barh(plot["label"], plot["median_difference_tumor_minus_normal"], color=["#E45756", "#4C78A8", "#9C755F"])
+    ax.axvline(0, color="#333333", lw=0.7)
+    ax.set_xlabel("Tumor - normal median score")
+    ax.set_ylabel("")
+    ax.set_title("GSE176031 epithelial hypo/hyper control")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_epithelial_hypo_hyper_promoter_control.pdf")
+    plt.close(fig)
+
+
+def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    FIGS.mkdir(parents=True, exist_ok=True)
+    NOTES.mkdir(parents=True, exist_ok=True)
+    gene_sets = read_gene_sets()
+    spatial_meta, spatial_corr, epi_tests = spatial_hypo_hyper_scores(gene_sets)
+    random_df, random_summary = matched_random_spatial_controls(gene_sets, n_iter=500)
+    scrna_control = scrna_hypo_hyper_control(gene_sets)
+    plot_outputs(spatial_corr, epi_tests, random_df, random_summary, scrna_control)
+
+    summary = [
+        "# Specificity control analyses",
+        "",
+        "## GSE230282 spatial hypo/hyper promoter correlations",
+        "",
+        spatial_corr.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## GSE230282 epithelial-enriched spot MP-high/low tests",
+        "",
+        epi_tests.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## GSE230282 matched random gene set control",
+        "",
+        random_summary.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## GSE176031 epithelial hypo/hyper promoter control",
+        "",
+        scrna_control.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Figures",
+        "",
+        "- `GSE230282_hypo_vs_hyper_spatial_correlation_heatmap.pdf`",
+        "- `GSE230282_epithelial_enriched_MP_high_low_programs.pdf`",
+        "- `GSE230282_matched_random_gene_set_control.pdf`",
+        "- `GSE176031_epithelial_hypo_hyper_promoter_control.pdf`",
+    ]
+    (NOTES / "specificity_control_summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("\n".join(summary))
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: run_final_marker_state_analyses.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\run_final_marker_state_analyses.py
+====================================================================================================
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy import stats
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+RAW176 = BASE / "01_raw_data" / "external_omics_validation" / "GSE176031_scRNA"
+RES176 = BASE / "03_analysis_results" / "external_omics_validation" / "GSE176031_scRNA"
+RES230 = BASE / "03_analysis_results" / "external_omics_validation" / "GSE230282_spatial"
+CTRL = BASE / "03_analysis_results" / "external_omics_validation" / "specificity_controls"
+OUT = BASE / "03_analysis_results" / "external_omics_validation" / "final_marker_state"
+FIGS = BASE / "04_figures_pdf" / "external_omics_validation" / "final_marker_state"
+NOTES = BASE / "08_notes" / "external_omics_validation" / "final_marker_state"
+
+
+HOUSEKEEPING_PREFIX = ("RPL", "RPS", "MT-")
+HOUSEKEEPING_GENES = {"MALAT1", "ACTB", "GAPDH", "B2M", "TPT1", "EEF1A1"}
+
+
+def bh_fdr(pvalues: np.ndarray) -> np.ndarray:
+    pvalues = np.asarray(pvalues, dtype=float)
+    fdr = np.full(len(pvalues), np.nan)
+    ok = np.isfinite(pvalues)
+    if ok.sum() == 0:
+        return fdr
+    order = np.argsort(pvalues[ok])
+    ranked = pvalues[ok][order] * ok.sum() / np.arange(1, ok.sum() + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    out = np.empty(ok.sum())
+    out[order] = np.clip(ranked, 0, 1)
+    fdr[ok] = out
+    return fdr
+
+
+def parse_sample(path: Path) -> str:
+    return path.name.replace("_dge.txt.gz", "")
+
+
+def load_mp_genes() -> tuple[list[str], list[str]]:
+    table = pd.read_csv(RES176 / "MP_gene_sets.tsv", sep="\t")
+    hypo = sorted(set(table.loc[table["gene_set"].eq("MP_promoter_hypomethylated"), "gene_symbol"].astype(str)))
+    hyper = sorted(set(table.loc[table["gene_set"].eq("MP_promoter_hypermethylated"), "gene_symbol"].astype(str)))
+    return hypo, hyper
+
+
+def scRNA_detectability_and_shortlist(hypo: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    meta = pd.read_csv(RES176 / "GSE176031_cell_metadata_with_MP_scores.tsv", sep="\t")
+    epi = meta[meta["cell_type_broad"].eq("Epithelial")].copy()
+    rows = []
+    for path in sorted(RAW176.glob("*dge.txt.gz")):
+        sample = parse_sample(path)
+        sample_epi = epi[epi["sample"].eq(sample)].copy()
+        if sample_epi.empty:
+            continue
+        counts = pd.read_csv(path, sep="\t", compression="gzip", index_col=0)
+        genes = [g for g in hypo if g in counts.index]
+        barcodes = [b for b in sample_epi["barcode"] if b in counts.columns]
+        if not genes or not barcodes:
+            continue
+        sub = counts.loc[genes, barcodes]
+        totals = counts.loc[:, barcodes].sum(axis=0).replace(0, np.nan)
+        norm = np.log1p(sub.div(totals, axis=1) * 1e4).fillna(0)
+        cell_condition = sample_epi.set_index("barcode").loc[barcodes, "condition"]
+        for gene in genes:
+            for condition in ["Normal", "Tumor"]:
+                cells = cell_condition.index[cell_condition.eq(condition)]
+                if len(cells) == 0:
+                    continue
+                rows.append(
+                    {
+                        "gene": gene,
+                        "sample": sample,
+                        "condition": condition,
+                        "n_cells": len(cells),
+                        "mean_expression": norm.loc[gene, cells].mean(),
+                        "pct_expressing": (sub.loc[gene, cells] > 0).mean() * 100,
+                    }
+                )
+    per_sample = pd.DataFrame(rows)
+    summary = (
+        per_sample.groupby(["gene", "condition"], as_index=False)
+        .agg(mean_expression=("mean_expression", "mean"), pct_expressing=("pct_expressing", "mean"), n_cells=("n_cells", "sum"))
+        .pivot(index="gene", columns="condition", values=["mean_expression", "pct_expressing"])
+    )
+    summary.columns = [f"{a}_{b}" for a, b in summary.columns]
+    summary = summary.reset_index().fillna(0)
+    summary["delta_mean_tumor_minus_normal"] = summary["mean_expression_Tumor"] - summary["mean_expression_Normal"]
+    summary["delta_pct_tumor_minus_normal"] = summary["pct_expressing_Tumor"] - summary["pct_expressing_Normal"]
+    summary["is_housekeeping_like"] = summary["gene"].str.startswith(HOUSEKEEPING_PREFIX) | summary["gene"].isin(HOUSEKEEPING_GENES)
+
+    spatial = pd.read_csv(CTRL / "GSE230282_spatial_hypo_hyper_scores.tsv", sep="\t")
+    # Contribution per gene in spatial state: correlation with hypo-minus-hyper-like axes
+    # The summary below relies on scRNA detectability plus spatial-compatible filters.
+    summary["shortlist_score"] = (
+        summary["delta_mean_tumor_minus_normal"] * np.log1p(summary["pct_expressing_Tumor"])
+        + 0.02 * summary["delta_pct_tumor_minus_normal"]
+    )
+    shortlist = summary[
+        (~summary["is_housekeeping_like"])
+        & (summary["pct_expressing_Tumor"] >= 1.0)
+        & (summary["delta_mean_tumor_minus_normal"] > 0)
+    ].sort_values("shortlist_score", ascending=False)
+    return summary.sort_values("shortlist_score", ascending=False), shortlist.head(15)
+
+
+def spatial_state_axis_and_epithelial_corr() -> tuple[pd.DataFrame, pd.DataFrame]:
+    spots = pd.read_csv(RES230 / "GSE230282_spatial_spot_MP_scores.tsv", sep="\t")
+    score = pd.read_csv(CTRL / "GSE230282_spatial_hypo_hyper_scores.tsv", sep="\t")
+    # Use the hypo-minus-hyper contrast for the final state plot because it
+    # controls for general promoter-gene expression.
+    cols = ["barcode", "MP_hypomethylated_promoter_score", "MP_hypermethylated_promoter_score", "MP_hypo_minus_hyper_score"]
+    spots = spots.merge(score[cols], on="barcode", how="left")
+    spots["NE_minus_AR_state"] = spots["Neuroendocrine_score"] - spots["AR_luminal_score"]
+    spots["MP_state_group"] = np.where(
+        spots["MP_hypo_minus_hyper_score"] >= spots["MP_hypo_minus_hyper_score"].quantile(0.75),
+        "MP-high",
+        np.where(spots["MP_hypo_minus_hyper_score"] <= spots["MP_hypo_minus_hyper_score"].quantile(0.25), "MP-low", "Mid"),
+    )
+
+    epi_cut = spots["Epithelial_score"].median()
+    epi = spots[spots["Epithelial_score"] >= epi_cut].copy()
+    rows = []
+    for score_col in ["MP_hypomethylated_promoter_score", "MP_hypo_minus_hyper_score"]:
+        for program in ["AR_luminal", "Proliferation", "Neuroendocrine", "Stromal_ECM"]:
+            ok = epi[[score_col, f"{program}_score"]].dropna()
+            r, p = stats.spearmanr(ok[score_col], ok[f"{program}_score"])
+            rows.append({"score": score_col, "program": program, "spearman_r": r, "pvalue": p, "n_spots": len(ok)})
+    corr = pd.DataFrame(rows)
+    corr["FDR"] = bh_fdr(corr["pvalue"].to_numpy())
+    return spots, corr
+
+
+def plot_outputs(detect: pd.DataFrame, shortlist: pd.DataFrame, spots: pd.DataFrame, corr: pd.DataFrame) -> None:
+    sns.set_theme(style="white", context="paper", font="Arial")
+    plt.rcParams.update({"pdf.fonttype": 42, "ps.fonttype": 42, "axes.linewidth": 0.75})
+
+    top = detect[~detect["is_housekeeping_like"]].head(18).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(4.2, 4.6))
+    ax.barh(top["gene"], top["shortlist_score"], color="#2A6F97")
+    ax.set_xlabel("Detectability-weighted tumor shift")
+    ax.set_ylabel("")
+    ax.set_title("Detectable MP-positive promoter genes")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_detectable_MP_gene_rank.pdf")
+    plt.close(fig)
+
+    dot = shortlist.copy().head(12)
+    dot = dot.melt(
+        id_vars=["gene"],
+        value_vars=["pct_expressing_Normal", "pct_expressing_Tumor", "mean_expression_Normal", "mean_expression_Tumor"],
+        var_name="metric_condition",
+        value_name="value",
+    )
+    pct = dot[dot["metric_condition"].str.startswith("pct")].copy()
+    mean = dot[dot["metric_condition"].str.startswith("mean")].copy()
+    pct["condition"] = pct["metric_condition"].str.replace("pct_expressing_", "", regex=False)
+    mean["condition"] = mean["metric_condition"].str.replace("mean_expression_", "", regex=False)
+    merged = pct[["gene", "condition", "value"]].rename(columns={"value": "pct"}).merge(
+        mean[["gene", "condition", "value"]].rename(columns={"value": "mean"}),
+        on=["gene", "condition"],
+    )
+    order = shortlist.head(12)["gene"].tolist()
+    fig, ax = plt.subplots(figsize=(5.2, 3.9))
+    for _, row in merged.iterrows():
+        ax.scatter(
+            ["Normal", "Tumor"].index(row["condition"]),
+            order.index(row["gene"]),
+            s=max(row["pct"], 0.2) * 6,
+            c=row["mean"],
+            cmap="magma",
+            vmin=0,
+            vmax=max(merged["mean"].quantile(0.95), 0.1),
+            edgecolors="#333333",
+            linewidths=0.25,
+        )
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Normal", "Tumor"])
+    ax.set_yticks(range(len(order)))
+    ax.set_yticklabels(order)
+    ax.set_title("High-confidence MP gene shortlist")
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    sm = plt.cm.ScalarMappable(cmap="magma", norm=plt.Normalize(0, max(merged["mean"].quantile(0.95), 0.1)))
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, fraction=0.035, pad=0.02, label="Mean log expression")
+    sns.despine(left=True, bottom=True)
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE176031_high_confidence_MP_gene_dotplot.pdf")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(4.25, 3.8))
+    sc = ax.scatter(
+        spots["AR_luminal_score"],
+        spots["Neuroendocrine_score"],
+        c=spots["MP_hypo_minus_hyper_score"],
+        s=7,
+        cmap="viridis",
+        linewidths=0,
+        alpha=0.82,
+    )
+    ax.set_xlabel("AR-luminal score")
+    ax.set_ylabel("Neuroendocrine score")
+    ax.set_title("Spatial low-AR / high-NE state")
+    fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.03, label="MP hypo - hyper score")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE230282_spatial_low_AR_high_NE_state.pdf")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(4.4, 3.0))
+    display = corr[corr["score"].eq("MP_hypo_minus_hyper_score") & corr["program"].isin(["AR_luminal", "Proliferation", "Neuroendocrine", "Stromal_ECM"])].copy()
+    display = display.sort_values("spearman_r")
+    colors = ["#4C78A8" if v < 0 else "#E45756" for v in display["spearman_r"]]
+    ax.barh(display["program"], display["spearman_r"], color=colors)
+    ax.axvline(0, color="#333333", lw=0.7)
+    ax.set_xlabel("Spearman r in epithelial-enriched spots")
+    ax.set_ylabel("")
+    ax.set_title("Epithelial-only continuous validation")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "GSE230282_epithelial_only_continuous_correlations.pdf")
+    plt.close(fig)
+
+
+def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    FIGS.mkdir(parents=True, exist_ok=True)
+    NOTES.mkdir(parents=True, exist_ok=True)
+    hypo, _hyper = load_mp_genes()
+    detect, shortlist = scRNA_detectability_and_shortlist(hypo)
+    detect.to_csv(OUT / "GSE176031_MP_gene_detectability.tsv", sep="\t", index=False)
+    shortlist.to_csv(OUT / "GSE176031_high_confidence_MP_gene_shortlist.tsv", sep="\t", index=False)
+
+    spots, corr = spatial_state_axis_and_epithelial_corr()
+    spots.to_csv(OUT / "GSE230282_spatial_state_axis_scores.tsv", sep="\t", index=False)
+    corr.to_csv(OUT / "GSE230282_epithelial_only_continuous_correlations.tsv", sep="\t", index=False)
+
+    plot_outputs(detect, shortlist, spots, corr)
+    summary = [
+        "# Final marker/state analyses",
+        "",
+        "## High-confidence MP gene shortlist",
+        "",
+        shortlist.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Epithelial-only spatial continuous correlations",
+        "",
+        corr.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Figures",
+        "",
+        "- `GSE176031_detectable_MP_gene_rank.pdf`",
+        "- `GSE176031_high_confidence_MP_gene_dotplot.pdf`",
+        "- `GSE230282_spatial_low_AR_high_NE_state.pdf`",
+        "- `GSE230282_epithelial_only_continuous_correlations.pdf`",
+    ]
+    (NOTES / "final_marker_state_summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("\n".join(summary))
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: run_tcga_prad_methylation_expression_validation.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\run_tcga_prad_methylation_expression_validation.py
+====================================================================================================
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy import stats
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+RAW = BASE / "01_raw_data" / "external_omics_validation" / "TCGA_PRAD_methylation_expression"
+GENESET = BASE / "03_analysis_results" / "external_omics_validation" / "GSE176031_scRNA" / "MP_gene_sets.tsv"
+SHORTLIST = BASE / "03_analysis_results" / "external_omics_validation" / "final_marker_state" / "GSE176031_high_confidence_MP_gene_shortlist.tsv"
+OUT = BASE / "03_analysis_results" / "external_omics_validation" / "TCGA_PRAD_methylation_expression"
+FIGS = BASE / "04_figures_pdf" / "external_omics_validation" / "TCGA_PRAD_methylation_expression"
+NOTES = BASE / "08_notes" / "external_omics_validation" / "TCGA_PRAD_methylation_expression"
+
+
+AR_GENES = ["AR", "KLK3", "KLK2", "NKX3-1", "ACPP", "FOXA1", "KRT8", "KRT18"]
+NE_GENES = ["CHGA", "CHGB", "SYP", "ENO2", "ASCL1", "INSM1", "DLL3", "NCAM1"]
+PROLIF_GENES = ["MKI67", "TOP2A", "UBE2C", "CDK1", "PCNA", "MCM2", "MCM5", "MCM7"]
+
+
+def bh_fdr(pvalues: np.ndarray) -> np.ndarray:
+    pvalues = np.asarray(pvalues, dtype=float)
+    fdr = np.full(len(pvalues), np.nan)
+    ok = np.isfinite(pvalues)
+    if ok.sum() == 0:
+        return fdr
+    order = np.argsort(pvalues[ok])
+    ranked = pvalues[ok][order] * ok.sum() / np.arange(1, ok.sum() + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    out = np.empty(ok.sum())
+    out[order] = np.clip(ranked, 0, 1)
+    fdr[ok] = out
+    return fdr
+
+
+def load_gene_sets() -> tuple[list[str], list[str], list[str]]:
+    table = pd.read_csv(GENESET, sep="\t")
+    hypo = sorted(set(table.loc[table["gene_set"].eq("MP_promoter_hypomethylated"), "gene_symbol"].astype(str)))
+    hyper = sorted(set(table.loc[table["gene_set"].eq("MP_promoter_hypermethylated"), "gene_symbol"].astype(str)))
+    shortlist = pd.read_csv(SHORTLIST, sep="\t")["gene"].dropna().astype(str).tolist()
+    return hypo, hyper, shortlist
+
+
+def load_expression(target_genes: set[str]) -> pd.DataFrame:
+    expr = pd.read_csv(RAW / "TCGA_PRAD_HiSeqV2.gz", sep="\t", compression="gzip")
+    expr = expr.rename(columns={expr.columns[0]: "gene"}).set_index("gene")
+    expr = expr.loc[expr.index.intersection(target_genes)]
+    expr = expr.apply(pd.to_numeric, errors="coerce")
+    return expr
+
+
+def map_probes_to_genes(target_genes: set[str]) -> pd.DataFrame:
+    probe_map = pd.read_csv(RAW / "illuminaMethyl450_hg19_GPL16304_TCGAlegacy_probeMap.tsv", sep="\t", comment="#", header=None, names=["probe", "gene", "chrom", "start", "end", "strand"])
+    rows = []
+    for _, row in probe_map.iterrows():
+        if pd.isna(row["gene"]) or row["gene"] == ".":
+            continue
+        genes = [g.strip() for g in str(row["gene"]).split(",")]
+        for gene in genes:
+            if gene in target_genes:
+                rows.append({"probe": row["probe"], "gene": gene})
+    out = pd.DataFrame(rows).drop_duplicates()
+    return out
+
+
+def load_selected_methylation(probes: set[str]) -> pd.DataFrame:
+    selected = []
+    for chunk in pd.read_csv(RAW / "TCGA_PRAD_HumanMethylation450.gz", sep="\t", compression="gzip", chunksize=6000):
+        probe_col = chunk.columns[0]
+        keep = chunk[probe_col].isin(probes)
+        if keep.any():
+            selected.append(chunk.loc[keep].rename(columns={probe_col: "probe"}))
+    if not selected:
+        raise RuntimeError("No methylation probes were selected.")
+    meth = pd.concat(selected, ignore_index=True).set_index("probe")
+    meth = meth.apply(pd.to_numeric, errors="coerce")
+    return meth
+
+
+def primary_tumor_common(expr: pd.DataFrame, gene_beta: pd.DataFrame) -> list[str]:
+    expr_samples = {c for c in expr.columns if c.endswith("-01")}
+    meth_samples = {c for c in gene_beta.columns if c.endswith("-01")}
+    return sorted(expr_samples & meth_samples)
+
+
+def zscore_rows(df: pd.DataFrame) -> pd.DataFrame:
+    return df.sub(df.mean(axis=1), axis=0).div(df.std(axis=1).replace(0, np.nan), axis=0)
+
+
+def mean_signature(expr: pd.DataFrame, genes: list[str], samples: list[str]) -> pd.Series:
+    present = [g for g in genes if g in expr.index]
+    if not present:
+        return pd.Series(np.nan, index=samples)
+    return zscore_rows(expr.loc[present, samples]).mean(axis=0)
+
+
+def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    FIGS.mkdir(parents=True, exist_ok=True)
+    NOTES.mkdir(parents=True, exist_ok=True)
+
+    hypo, hyper, shortlist = load_gene_sets()
+    target_genes = set(hypo + hyper + shortlist + AR_GENES + NE_GENES + PROLIF_GENES)
+    expr = load_expression(target_genes)
+    probe_gene = map_probes_to_genes(set(hypo + hyper + shortlist))
+    probe_gene.to_csv(OUT / "TCGA_PRAD_selected_probe_gene_map.tsv", sep="\t", index=False)
+    meth = load_selected_methylation(set(probe_gene["probe"]))
+
+    gene_beta_rows = []
+    for gene, sub in probe_gene.groupby("gene"):
+        probes = [p for p in sub["probe"] if p in meth.index]
+        if probes:
+            vals = meth.loc[probes].mean(axis=0, skipna=True)
+            vals.name = gene
+            gene_beta_rows.append(vals)
+    gene_beta = pd.DataFrame(gene_beta_rows)
+    gene_beta.to_csv(OUT / "TCGA_PRAD_gene_level_methylation_beta.tsv", sep="\t")
+
+    samples = primary_tumor_common(expr, gene_beta)
+    expr = expr.loc[:, samples]
+    gene_beta = gene_beta.loc[:, samples]
+
+    rows = []
+    for gene in sorted(set(expr.index) & set(gene_beta.index)):
+        ok = pd.DataFrame({"expression": expr.loc[gene], "methylation": gene_beta.loc[gene]}).dropna()
+        if len(ok) < 30:
+            continue
+        r, p = stats.spearmanr(ok["methylation"], ok["expression"])
+        rows.append(
+            {
+                "gene": gene,
+                "n_samples": len(ok),
+                "spearman_r_methylation_vs_expression": r,
+                "pvalue": p,
+                "gene_class": "shortlist" if gene in shortlist else ("hypomethylated" if gene in hypo else "hypermethylated"),
+            }
+        )
+    gene_corr = pd.DataFrame(rows)
+    gene_corr["FDR"] = bh_fdr(gene_corr["pvalue"].to_numpy())
+    gene_corr.to_csv(OUT / "TCGA_PRAD_gene_methylation_expression_correlations.tsv", sep="\t", index=False)
+
+    hypo_present = [g for g in hypo if g in expr.index and g in gene_beta.index]
+    hyper_present = [g for g in hyper if g in expr.index and g in gene_beta.index]
+    short_present = [g for g in shortlist if g in expr.index and g in gene_beta.index]
+    score = pd.DataFrame(index=samples)
+    score["MP_hypo_expression_score"] = mean_signature(expr, hypo_present, samples)
+    score["MP_hyper_expression_score"] = mean_signature(expr, hyper_present, samples)
+    score["MP_shortlist_expression_score"] = mean_signature(expr, short_present, samples)
+    score["MP_hypo_methylation_score"] = gene_beta.loc[hypo_present, samples].mean(axis=0)
+    score["MP_hyper_methylation_score"] = gene_beta.loc[hyper_present, samples].mean(axis=0)
+    score["MP_hypo_minus_hyper_expression_score"] = score["MP_hypo_expression_score"] - score["MP_hyper_expression_score"]
+    score["MP_hyper_minus_hypo_methylation_score"] = score["MP_hyper_methylation_score"] - score["MP_hypo_methylation_score"]
+    score["AR_luminal_score"] = mean_signature(expr, AR_GENES, samples)
+    score["Neuroendocrine_score"] = mean_signature(expr, NE_GENES, samples)
+    score["Proliferation_score"] = mean_signature(expr, PROLIF_GENES, samples)
+    score["NE_minus_AR_score"] = score["Neuroendocrine_score"] - score["AR_luminal_score"]
+    score.to_csv(OUT / "TCGA_PRAD_MP_methylation_expression_scores.tsv", sep="\t")
+
+    score_tests = []
+    comparisons = [
+        ("hypo_methylation_vs_hypo_expression", "MP_hypo_methylation_score", "MP_hypo_expression_score"),
+        ("hyper_minus_hypo_methylation_vs_hypo_minus_hyper_expression", "MP_hyper_minus_hypo_methylation_score", "MP_hypo_minus_hyper_expression_score"),
+        ("shortlist_expression_vs_AR", "MP_shortlist_expression_score", "AR_luminal_score"),
+        ("shortlist_expression_vs_NE", "MP_shortlist_expression_score", "Neuroendocrine_score"),
+        ("shortlist_expression_vs_NE_minus_AR", "MP_shortlist_expression_score", "NE_minus_AR_score"),
+        ("hypo_expression_vs_AR", "MP_hypo_expression_score", "AR_luminal_score"),
+        ("hypo_expression_vs_NE", "MP_hypo_expression_score", "Neuroendocrine_score"),
+    ]
+    for name, x, y in comparisons:
+        ok = score[[x, y]].dropna()
+        r, p = stats.spearmanr(ok[x], ok[y])
+        score_tests.append({"comparison": name, "x": x, "y": y, "spearman_r": r, "pvalue": p, "n_samples": len(ok)})
+    score_tests = pd.DataFrame(score_tests)
+    score_tests["FDR"] = bh_fdr(score_tests["pvalue"].to_numpy())
+    score_tests.to_csv(OUT / "TCGA_PRAD_score_level_correlations.tsv", sep="\t", index=False)
+
+    sns.set_theme(style="white", context="paper", font="Arial")
+    plt.rcParams.update({"pdf.fonttype": 42, "ps.fonttype": 42, "axes.linewidth": 0.75})
+
+    fig, ax = plt.subplots(figsize=(4.0, 3.4))
+    sns.regplot(
+        data=score,
+        x="MP_hyper_minus_hypo_methylation_score",
+        y="MP_hypo_minus_hyper_expression_score",
+        scatter_kws={"s": 14, "alpha": 0.65, "linewidths": 0},
+        line_kws={"color": "#B03A2E", "lw": 1.2},
+        color="#4C78A8",
+        ax=ax,
+    )
+    r = score_tests.loc[score_tests["comparison"].eq("hyper_minus_hypo_methylation_vs_hypo_minus_hyper_expression"), "spearman_r"].iloc[0]
+    p = score_tests.loc[score_tests["comparison"].eq("hyper_minus_hypo_methylation_vs_hypo_minus_hyper_expression"), "FDR"].iloc[0]
+    ax.set_title(f"TCGA-PRAD paired methylation-expression\nSpearman r={r:.2f}, FDR={p:.1e}")
+    ax.set_xlabel("Hyper - hypo promoter methylation score")
+    ax.set_ylabel("Hypo - hyper expression score")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "TCGA_PRAD_MP_methylation_expression_contrast_scatter.pdf")
+    plt.close(fig)
+
+    top = gene_corr.sort_values("spearman_r_methylation_vs_expression").head(15).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(4.6, 4.0))
+    colors = ["#2A6F97" if c != "hypermethylated" else "#9C755F" for c in top["gene_class"]]
+    ax.barh(top["gene"], top["spearman_r_methylation_vs_expression"], color=colors)
+    ax.axvline(0, color="#333333", lw=0.7)
+    ax.set_xlabel("Spearman r: methylation vs expression")
+    ax.set_ylabel("")
+    ax.set_title("Genes with negative methylation-expression coupling")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "TCGA_PRAD_gene_level_negative_correlations.pdf")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(4.2, 3.4))
+    sns.regplot(
+        data=score,
+        x="AR_luminal_score",
+        y="Neuroendocrine_score",
+        scatter=False,
+        color="#333333",
+        line_kws={"lw": 0.8, "alpha": 0.4},
+        ax=ax,
+    )
+    sc = ax.scatter(score["AR_luminal_score"], score["Neuroendocrine_score"], c=score["MP_shortlist_expression_score"], s=14, cmap="viridis", linewidths=0, alpha=0.8)
+    ax.set_xlabel("AR-luminal expression score")
+    ax.set_ylabel("Neuroendocrine expression score")
+    ax.set_title("TCGA-PRAD bulk AR/NE state")
+    fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.03, label="MP-related shortlist score")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "TCGA_PRAD_AR_NE_state_MP_expression.pdf")
+    plt.close(fig)
+
+    summary = [
+        "# TCGA-PRAD methylation-expression validation",
+        "",
+        f"- Common primary tumor samples: {len(samples)}",
+        f"- Hypomethylated genes with methylation and expression: {len(hypo_present)}",
+        f"- Hypermethylated genes with methylation and expression: {len(hyper_present)}",
+        f"- Shortlist genes with methylation and expression: {len(short_present)}",
+        "",
+        "## Score-level correlations",
+        "",
+        score_tests.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Top negative gene-level methylation-expression correlations",
+        "",
+        gene_corr.sort_values("spearman_r_methylation_vs_expression").head(20).to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Figures",
+        "",
+        "- `TCGA_PRAD_MP_methylation_expression_contrast_scatter.pdf`",
+        "- `TCGA_PRAD_gene_level_negative_correlations.pdf`",
+        "- `TCGA_PRAD_AR_NE_state_MP_expression.pdf`",
+    ]
+    (NOTES / "TCGA_PRAD_methylation_expression_summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("\n".join(summary))
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: run_tcga_clinical_aggressive_state.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\run_tcga_clinical_aggressive_state.py
+====================================================================================================
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from lifelines import CoxPHFitter, KaplanMeierFitter
+from lifelines.statistics import logrank_test
+from scipy import stats
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+RAW = BASE / "01_raw_data" / "external_omics_validation" / "TCGA_PRAD_methylation_expression"
+PREV = BASE / "03_analysis_results" / "external_omics_validation" / "TCGA_PRAD_methylation_expression"
+OUT = BASE / "03_analysis_results" / "external_omics_validation" / "TCGA_PRAD_clinical_aggressive_state"
+FIGS = BASE / "04_figures_pdf" / "external_omics_validation" / "TCGA_PRAD_clinical_aggressive_state"
+NOTES = BASE / "08_notes" / "external_omics_validation" / "TCGA_PRAD_clinical_aggressive_state"
+
+
+SIGNATURES = {
+    "AR_luminal": ["AR", "KLK3", "KLK2", "NKX3-1", "ACPP", "FOXA1", "KRT8", "KRT18"],
+    "Neuroendocrine": ["CHGA", "CHGB", "SYP", "ENO2", "ASCL1", "INSM1", "DLL3", "NCAM1"],
+    "Proliferation": ["MKI67", "TOP2A", "UBE2C", "CDK1", "PCNA", "MCM2", "MCM5", "MCM7", "AURKB", "BIRC5"],
+    "Migration_invasion": ["MMP2", "MMP9", "MMP14", "ITGA6", "ITGB4", "CXCR4", "LAMC2", "PLAUR", "SERPINE1", "S100A4"],
+    "EMT_plasticity": ["VIM", "FN1", "ZEB1", "ZEB2", "SNAI1", "SNAI2", "TWIST1", "ITGA5", "ITGB1", "CDH2", "SPARC"],
+    "Hypoxia": ["CA9", "VEGFA", "LDHA", "SLC2A1", "PDK1", "BNIP3", "EGLN3", "NDRG1", "ADM", "ENO1"],
+    "Stemness_plasticity": ["SOX2", "MYC", "EZH2", "BMI1", "PROM1", "ALDH1A1", "NANOG", "KLF4", "POU5F1"],
+    "DNA_repair": ["BRCA1", "BRCA2", "RAD51", "FANCD2", "MSH2", "MSH6", "CHEK1", "CHEK2", "PARP1", "XRCC1"],
+    "Inflammation_IFN": ["STAT1", "IRF1", "CXCL9", "CXCL10", "IFIT1", "IFIT3", "ISG15", "OAS1", "MX1"],
+}
+
+
+MP_SCORE_COLS = [
+    "MP_shortlist_expression_score",
+    "MP_hypo_expression_score",
+    "MP_hypo_minus_hyper_expression_score",
+    "MP_hyper_minus_hypo_methylation_score",
+]
+
+
+def bh_fdr(pvalues: np.ndarray) -> np.ndarray:
+    pvalues = np.asarray(pvalues, dtype=float)
+    fdr = np.full(len(pvalues), np.nan)
+    ok = np.isfinite(pvalues)
+    if ok.sum() == 0:
+        return fdr
+    order = np.argsort(pvalues[ok])
+    ranked = pvalues[ok][order] * ok.sum() / np.arange(1, ok.sum() + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    out = np.empty(ok.sum())
+    out[order] = np.clip(ranked, 0, 1)
+    fdr[ok] = out
+    return fdr
+
+
+def zscore_rows(df: pd.DataFrame) -> pd.DataFrame:
+    return df.sub(df.mean(axis=1), axis=0).div(df.std(axis=1).replace(0, np.nan), axis=0)
+
+
+def mean_signature(expr: pd.DataFrame, genes: list[str], samples: list[str]) -> pd.Series:
+    present = [g for g in genes if g in expr.index]
+    if not present:
+        return pd.Series(np.nan, index=samples)
+    return zscore_rows(expr.loc[present, samples]).mean(axis=0)
+
+
+def load_expression(target_genes: set[str]) -> pd.DataFrame:
+    expr = pd.read_csv(RAW / "TCGA_PRAD_HiSeqV2.gz", sep="\t", compression="gzip")
+    expr = expr.rename(columns={expr.columns[0]: "gene"}).set_index("gene")
+    expr = expr.loc[expr.index.intersection(target_genes)]
+    expr = expr.apply(pd.to_numeric, errors="coerce")
+    return expr
+
+
+def parse_t_stage(value) -> str:
+    if pd.isna(value):
+        return np.nan
+    value = str(value).upper()
+    if value.startswith("T2"):
+        return "T2"
+    if value.startswith("T3") or value.startswith("T4"):
+        return "T3/T4"
+    return np.nan
+
+
+def parse_n_stage(value) -> str:
+    if pd.isna(value):
+        return np.nan
+    value = str(value).upper()
+    if value.startswith("N0"):
+        return "N0"
+    if value.startswith("N1"):
+        return "N1"
+    return np.nan
+
+
+def gleason_group(value) -> str:
+    if pd.isna(value):
+        return np.nan
+    try:
+        v = int(float(value))
+    except ValueError:
+        return np.nan
+    if v <= 6:
+        return "<=6"
+    if v == 7:
+        return "7"
+    return ">=8"
+
+
+def prep_clinical_scores() -> pd.DataFrame:
+    score = pd.read_csv(PREV / "TCGA_PRAD_MP_methylation_expression_scores.tsv", sep="\t", index_col=0)
+    clin = pd.read_csv(RAW / "TCGA_PRAD_clinicalMatrix.tsv", sep="\t")
+    merged = score.merge(clin, left_index=True, right_on="sampleID", how="inner")
+    merged = merged[merged["sample_type"].eq("Primary Tumor")].copy()
+    merged["Gleason_group"] = merged["gleason_score"].map(gleason_group)
+    merged["T_group"] = merged["pathologic_T"].map(parse_t_stage)
+    merged["N_group"] = merged["pathologic_N"].map(parse_n_stage)
+    merged["BCR_status"] = merged["biochemical_recurrence"].map({"YES": "BCR", "NO": "No BCR"})
+    merged["BCR_event"] = merged["biochemical_recurrence"].map({"YES": 1, "NO": 0})
+    merged["BCR_time_days"] = np.where(
+        merged["BCR_event"].eq(1),
+        pd.to_numeric(merged["days_to_first_biochemical_recurrence"], errors="coerce"),
+        pd.to_numeric(merged["days_to_last_followup"], errors="coerce"),
+    )
+    merged["age"] = pd.to_numeric(merged["age_at_initial_pathologic_diagnosis"], errors="coerce")
+    merged["gleason_numeric"] = pd.to_numeric(merged["gleason_score"], errors="coerce")
+    merged["advanced_T"] = merged["T_group"].map({"T2": 0, "T3/T4": 1})
+    merged["node_positive"] = merged["N_group"].map({"N0": 0, "N1": 1})
+    return merged
+
+
+def clinical_group_tests(df: pd.DataFrame) -> pd.DataFrame:
+    tests = []
+    group_specs = [
+        ("Gleason_group", ["<=6", "7", ">=8"]),
+        ("T_group", ["T2", "T3/T4"]),
+        ("N_group", ["N0", "N1"]),
+        ("BCR_status", ["No BCR", "BCR"]),
+    ]
+    for score_col in MP_SCORE_COLS:
+        for group_col, order in group_specs:
+            sub = df[[score_col, group_col]].dropna()
+            sub = sub[sub[group_col].isin(order)]
+            if sub[group_col].nunique() < 2:
+                continue
+            values = [sub.loc[sub[group_col].eq(g), score_col].dropna() for g in order if g in set(sub[group_col])]
+            if len(values) == 2:
+                stat, p = stats.mannwhitneyu(values[0], values[1], alternative="two-sided")
+                test = "Mann-Whitney"
+            else:
+                stat, p = stats.kruskal(*values)
+                test = "Kruskal-Wallis"
+            tests.append(
+                {
+                    "score": score_col,
+                    "clinical_group": group_col,
+                    "test": test,
+                    "statistic": stat,
+                    "pvalue": p,
+                    "n": len(sub),
+                    "group_medians": "; ".join(f"{g}={sub.loc[sub[group_col].eq(g), score_col].median():.3g}" for g in order if g in set(sub[group_col])),
+                    "group_counts": "; ".join(f"{g}={sub[group_col].eq(g).sum()}" for g in order if g in set(sub[group_col])),
+                }
+            )
+    out = pd.DataFrame(tests)
+    out["FDR"] = bh_fdr(out["pvalue"].to_numpy())
+    return out.sort_values(["score", "FDR"])
+
+
+def survival_tests(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    surv = df.dropna(subset=["BCR_time_days", "BCR_event"]).copy()
+    surv = surv[surv["BCR_time_days"] > 0].copy()
+    rows = []
+    cox_rows = []
+    for score_col in MP_SCORE_COLS:
+        x = surv[score_col]
+        cut = x.median()
+        high = surv[score_col] >= cut
+        lr = logrank_test(
+            surv.loc[high, "BCR_time_days"],
+            surv.loc[~high, "BCR_time_days"],
+            event_observed_A=surv.loc[high, "BCR_event"],
+            event_observed_B=surv.loc[~high, "BCR_event"],
+        )
+        rows.append(
+            {
+                "score": score_col,
+                "cutpoint": "median",
+                "cut_value": cut,
+                "n_high": int(high.sum()),
+                "n_low": int((~high).sum()),
+                "events_high": int(surv.loc[high, "BCR_event"].sum()),
+                "events_low": int(surv.loc[~high, "BCR_event"].sum()),
+                "logrank_pvalue": lr.p_value,
+            }
+        )
+        cdat = surv[["BCR_time_days", "BCR_event", score_col, "age", "gleason_numeric", "advanced_T"]].dropna().copy()
+        if cdat["BCR_event"].sum() >= 5:
+            cdat[score_col + "_z"] = (cdat[score_col] - cdat[score_col].mean()) / cdat[score_col].std()
+            cph = CoxPHFitter()
+            cph.fit(cdat[["BCR_time_days", "BCR_event", score_col + "_z"]], duration_col="BCR_time_days", event_col="BCR_event")
+            s = cph.summary.loc[score_col + "_z"]
+            cox_rows.append({"model": "univariate", "score": score_col, "HR_per_SD": s["exp(coef)"], "pvalue": s["p"], "n": len(cdat), "events": int(cdat["BCR_event"].sum())})
+            cph2 = CoxPHFitter()
+            covars = [score_col + "_z", "age", "gleason_numeric", "advanced_T"]
+            cph2.fit(cdat[["BCR_time_days", "BCR_event"] + covars], duration_col="BCR_time_days", event_col="BCR_event")
+            s2 = cph2.summary.loc[score_col + "_z"]
+            cox_rows.append({"model": "adjusted_age_gleason_T", "score": score_col, "HR_per_SD": s2["exp(coef)"], "pvalue": s2["p"], "n": len(cdat), "events": int(cdat["BCR_event"].sum())})
+    km = pd.DataFrame(rows)
+    km["FDR"] = bh_fdr(km["logrank_pvalue"].to_numpy())
+    cox = pd.DataFrame(cox_rows)
+    cox["FDR"] = bh_fdr(cox["pvalue"].to_numpy())
+    return km, cox
+
+
+def signature_scores(samples: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    genes = {g for genes in SIGNATURES.values() for g in genes}
+    expr = load_expression(genes)
+    available_samples = [s for s in samples if s in expr.columns]
+    rows = {}
+    overlap = []
+    for name, geneset in SIGNATURES.items():
+        present = [g for g in geneset if g in expr.index]
+        overlap.append({"signature": name, "n_genes_defined": len(geneset), "n_genes_present": len(present), "present_genes": ",".join(present)})
+        rows[name] = mean_signature(expr, geneset, available_samples)
+    sig = pd.DataFrame(rows)
+    return sig, pd.DataFrame(overlap)
+
+
+def signature_correlation(df: pd.DataFrame, sig: pd.DataFrame) -> pd.DataFrame:
+    merged = df.set_index("sampleID")[MP_SCORE_COLS].join(sig, how="inner")
+    rows = []
+    for mp in MP_SCORE_COLS:
+        for signature in SIGNATURES:
+            ok = merged[[mp, signature]].dropna()
+            r, p = stats.spearmanr(ok[mp], ok[signature])
+            rows.append({"mp_score": mp, "signature": signature, "spearman_r": r, "pvalue": p, "n_samples": len(ok)})
+    out = pd.DataFrame(rows)
+    out["FDR"] = bh_fdr(out["pvalue"].to_numpy())
+    return out.sort_values(["mp_score", "spearman_r"])
+
+
+def plot_clinical(df: pd.DataFrame, tests: pd.DataFrame) -> None:
+    sns.set_theme(style="white", context="paper", font="Arial")
+    plt.rcParams.update({"pdf.fonttype": 42, "ps.fonttype": 42, "axes.linewidth": 0.75})
+    score_col = "MP_shortlist_expression_score"
+    panels = [
+        ("Gleason_group", ["<=6", "7", ">=8"], "Gleason score"),
+        ("T_group", ["T2", "T3/T4"], "Pathologic T stage"),
+        ("BCR_status", ["No BCR", "BCR"], "Biochemical recurrence"),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(9.6, 3.25), sharey=True)
+    for ax, (col, order, title) in zip(axes, panels):
+        sub = df[[score_col, col]].dropna()
+        sns.boxplot(data=sub, x=col, y=score_col, order=order, ax=ax, width=0.55, color="#DDE6ED", fliersize=0)
+        sns.stripplot(data=sub, x=col, y=score_col, order=order, ax=ax, color="#4B5563", size=2.2, alpha=0.45, jitter=0.22)
+        hit = tests[(tests["score"].eq(score_col)) & (tests["clinical_group"].eq(col))]
+        label = f"FDR={hit['FDR'].iloc[0]:.2g}" if not hit.empty else ""
+        ax.set_title(f"{title}\n{label}")
+        ax.set_xlabel("")
+        ax.set_ylabel("MP-related expression score" if ax is axes[0] else "")
+        ax.tick_params(axis="x", rotation=20)
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "TCGA_PRAD_MP_score_clinical_aggressiveness_boxplots.pdf")
+    plt.close(fig)
+
+
+def plot_km(df: pd.DataFrame, km: pd.DataFrame) -> None:
+    score_col = "MP_shortlist_expression_score"
+    surv = df.dropna(subset=["BCR_time_days", "BCR_event", score_col]).copy()
+    surv = surv[surv["BCR_time_days"] > 0].copy()
+    cut = surv[score_col].median()
+    surv["MP_group"] = np.where(surv[score_col] >= cut, "MP-high", "MP-low")
+    fig, ax = plt.subplots(figsize=(4.2, 3.5))
+    kmf = KaplanMeierFitter()
+    colors = {"MP-low": "#4C78A8", "MP-high": "#D85C57"}
+    for group in ["MP-low", "MP-high"]:
+        sub = surv[surv["MP_group"].eq(group)]
+        kmf.fit(sub["BCR_time_days"] / 365.25, sub["BCR_event"], label=f"{group} (n={len(sub)}, events={int(sub['BCR_event'].sum())})")
+        kmf.plot_survival_function(ax=ax, ci_show=False, color=colors[group], lw=1.5)
+    hit = km[km["score"].eq(score_col)].iloc[0]
+    ax.set_title(f"TCGA-PRAD biochemical recurrence-free survival\nlog-rank FDR={hit['FDR']:.2g}")
+    ax.set_xlabel("Years")
+    ax.set_ylabel("BCR-free probability")
+    ax.set_ylim(0, 1.03)
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "TCGA_PRAD_MP_score_BCR_free_survival.pdf")
+    plt.close(fig)
+
+
+def plot_signature(corr: pd.DataFrame) -> None:
+    sub = corr[corr["mp_score"].eq("MP_shortlist_expression_score")].copy()
+    sub = sub.sort_values("spearman_r")
+    colors = ["#4C78A8" if r < 0 else "#D85C57" for r in sub["spearman_r"]]
+    fig, ax = plt.subplots(figsize=(5.2, 3.65))
+    ax.barh(sub["signature"], sub["spearman_r"], color=colors)
+    ax.axvline(0, color="#333333", lw=0.75)
+    for _, row in sub.iterrows():
+        x = row["spearman_r"]
+        label = "FDR<1e-20" if row["FDR"] < 1e-20 else f"FDR={row['FDR']:.1g}"
+        if x < 0:
+            ax.text(0.025, row["signature"], label, va="center", ha="left", fontsize=7.4, color="#3C4043")
+        else:
+            ax.text(x + 0.025, row["signature"], label, va="center", ha="left", fontsize=7.4, color="#3C4043")
+    ax.set_xlim(-0.48, 0.43)
+    ax.set_xlabel("Spearman r with MP-related expression score")
+    ax.set_ylabel("")
+    ax.set_title("TCGA-PRAD aggressive-state signature correlations")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / "TCGA_PRAD_MP_score_aggressive_state_signature_correlations.pdf")
+    plt.close(fig)
+
+    heat = corr.pivot(index="signature", columns="mp_score", values="spearman_r").loc[list(SIGNATURES)]
+    fig, ax = plt.subplots(figsize=(6.2, 4.2))
+    sns.heatmap(heat, cmap="vlag", center=0, annot=True, fmt=".2f", linewidths=0.45, linecolor="white", cbar_kws={"label": "Spearman r"}, ax=ax)
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.set_title("MP scores vs aggressive-state signatures")
+    fig.tight_layout()
+    fig.savefig(FIGS / "TCGA_PRAD_MP_scores_signature_correlation_heatmap.pdf")
+    plt.close(fig)
+
+
+def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    FIGS.mkdir(parents=True, exist_ok=True)
+    NOTES.mkdir(parents=True, exist_ok=True)
+
+    df = prep_clinical_scores()
+    df.to_csv(OUT / "TCGA_PRAD_clinical_MP_scores.tsv", sep="\t", index=False)
+
+    clin_tests = clinical_group_tests(df)
+    clin_tests.to_csv(OUT / "TCGA_PRAD_MP_score_clinical_group_tests.tsv", sep="\t", index=False)
+
+    km, cox = survival_tests(df)
+    km.to_csv(OUT / "TCGA_PRAD_MP_score_BCR_survival_logrank.tsv", sep="\t", index=False)
+    cox.to_csv(OUT / "TCGA_PRAD_MP_score_BCR_survival_cox.tsv", sep="\t", index=False)
+
+    sig, overlap = signature_scores(df["sampleID"].tolist())
+    sig.to_csv(OUT / "TCGA_PRAD_aggressive_state_signature_scores.tsv", sep="\t")
+    overlap.to_csv(OUT / "TCGA_PRAD_aggressive_state_signature_gene_overlap.tsv", sep="\t", index=False)
+    corr = signature_correlation(df, sig)
+    corr.to_csv(OUT / "TCGA_PRAD_MP_score_aggressive_state_signature_correlations.tsv", sep="\t", index=False)
+
+    plot_clinical(df, clin_tests)
+    plot_km(df, km)
+    plot_signature(corr)
+
+    summary = [
+        "# TCGA-PRAD clinical and aggressive-state validation",
+        "",
+        f"- Matched primary tumors with MP scores and clinical table: {len(df)}",
+        f"- BCR survival analyzable samples: {df.dropna(subset=['BCR_time_days', 'BCR_event']).query('BCR_time_days > 0').shape[0]}",
+        f"- BCR events: {int(df['BCR_event'].fillna(0).sum())}",
+        "",
+        "## Clinical group tests",
+        "",
+        clin_tests.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## BCR survival log-rank",
+        "",
+        km.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## BCR Cox models",
+        "",
+        cox.to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Aggressive-state signature correlations",
+        "",
+        corr[corr["mp_score"].eq("MP_shortlist_expression_score")].sort_values("spearman_r").to_string(index=False, float_format=lambda x: f"{x:.4g}"),
+        "",
+        "## Figures",
+        "",
+        "- `TCGA_PRAD_MP_score_clinical_aggressiveness_boxplots.pdf`",
+        "- `TCGA_PRAD_MP_score_BCR_free_survival.pdf`",
+        "- `TCGA_PRAD_MP_score_aggressive_state_signature_correlations.pdf`",
+        "- `TCGA_PRAD_MP_scores_signature_correlation_heatmap.pdf`",
+    ]
+    (NOTES / "TCGA_PRAD_clinical_aggressive_state_summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("\n".join(summary))
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: make_unified_core_panel_fdr_figures.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\make_unified_core_panel_fdr_figures.py
+====================================================================================================
+
+from __future__ import annotations
+
+import gzip
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy import sparse, stats
+from scipy.io import mmread
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+RESULT_ROOT = BASE / "03_analysis_results" / "external_omics_validation"
+RAW_ROOT = BASE / "01_raw_data" / "external_omics_validation"
+OUT = RESULT_ROOT / "unified_core_panel_FDR_20260606"
+FIGS = BASE / "04_figures_pdf" / "external_omics_validation" / "unified_core_panel_FDR_20260606"
+
+POSITIVE = "#F9BEBB"
+NEGATIVE = "#B0C9DE"
+POINT = "#6B7280"
+TEXT = "#30343B"
+
+CORE_SIGNATURES = {
+    "AR_luminal": ["AR", "KLK3", "KLK2", "NKX3-1", "ACPP", "FOXA1", "KRT8", "KRT18"],
+    "Neuroendocrine_like": ["CHGA", "CHGB", "SYP", "ENO2", "ASCL1", "INSM1", "DLL3", "NCAM1", "TUBB3"],
+    "Proliferation": ["MKI67", "TOP2A", "UBE2C", "CDK1", "PCNA", "MCM2", "MCM5", "MCM7", "AURKB", "BIRC5"],
+    "Migration_invasion": ["MMP2", "MMP9", "MMP14", "ITGA6", "ITGB4", "CXCR4", "CXCL8", "LAMC2", "PLAUR", "SERPINE1", "S100A4"],
+    "EMT_plasticity": ["VIM", "FN1", "ZEB1", "ZEB2", "SNAI1", "SNAI2", "TWIST1", "ITGA5", "ITGB1", "CDH2", "SPARC"],
+    "ECM_remodeling": ["COL1A1", "COL1A2", "COL3A1", "DCN", "LUM", "THBS2", "POSTN", "LOX", "TAGLN"],
+}
+
+DISPLAY_ORDER = [
+    "AR_luminal",
+    "EMT_plasticity",
+    "ECM_remodeling",
+    "Neuroendocrine_like",
+    "Proliferation",
+    "Migration_invasion",
+]
+
+
+def bh_fdr(pvalues) -> np.ndarray:
+    pvalues = np.asarray(pvalues, dtype=float)
+    result = np.full(len(pvalues), np.nan)
+    ok = np.isfinite(pvalues)
+    if ok.sum() == 0:
+        return result
+    order = np.argsort(pvalues[ok])
+    ranked = pvalues[ok][order] * ok.sum() / np.arange(1, ok.sum() + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    values = np.empty(ok.sum())
+    values[order] = np.clip(ranked, 0, 1)
+    result[ok] = values
+    return result
+
+
+def fdr_label(value: float) -> str:
+    if not np.isfinite(value):
+        return "FDR=NA"
+    if value < 1e-20:
+        return "FDR<1e-20"
+    if value < 0.001:
+        return f"FDR={value:.1e}"
+    return f"FDR={value:.3f}".rstrip("0").rstrip(".")
+
+
+def setup_style() -> None:
+    sns.set_theme(style="white", context="paper", font="Arial")
+    plt.rcParams.update(
+        {
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+            "axes.linewidth": 0.8,
+            "axes.labelcolor": TEXT,
+            "text.color": TEXT,
+            "xtick.color": TEXT,
+            "ytick.color": TEXT,
+        }
+    )
+
+
+def scrna_core_panel() -> pd.DataFrame:
+    ranking = pd.read_csv(
+        RESULT_ROOT / "MP_high_followup" / "GSE176031_tumor_epithelial_MP_high_vs_low_gene_ranking.tsv",
+        sep="\t",
+    )
+    values = ranking.set_index("gene")["logFC_MP_high_vs_low"].dropna()
+    rows = []
+    for signature, genes in CORE_SIGNATURES.items():
+        present = [gene for gene in genes if gene in values.index]
+        background = values.drop(index=present, errors="ignore")
+        signature_values = values.loc[present]
+        stat, pvalue = stats.mannwhitneyu(signature_values, background, alternative="two-sided")
+        rows.append(
+            {
+                "signature": signature,
+                "n_genes_present": len(present),
+                "mean_logFC": signature_values.mean(),
+                "median_logFC": signature_values.median(),
+                "pvalue_two_sided": pvalue,
+                "present_genes": ",".join(present),
+            }
+        )
+    result = pd.DataFrame(rows)
+    result["FDR"] = bh_fdr(result["pvalue_two_sided"])
+    result.to_csv(OUT / "GSE176031_core_panel_two_sided_tests.tsv", sep="\t", index=False)
+    return result
+
+
+def plot_scrna(result: pd.DataFrame) -> None:
+    data = result.set_index("signature").loc[DISPLAY_ORDER].reset_index()
+    fig = plt.figure(figsize=(7.3, 4.4))
+    grid = fig.add_gridspec(1, 2, width_ratios=[1.0, 2.8], wspace=0.06)
+    left = fig.add_subplot(grid[0, 0])
+    right = fig.add_subplot(grid[0, 1], sharey=left)
+    y = np.arange(len(data))
+
+    for ax in (left, right):
+        ax.axvline(0, color="#444444", lw=0.8)
+        ax.set_ylim(-0.6, len(data) - 0.4)
+
+    for i, row in data.iterrows():
+        value = row["mean_logFC"]
+        color = POSITIVE if value >= 0 else NEGATIVE
+        target = left if value < -0.10 else right
+        target.barh(i, value, color=color, edgecolor="#FFFFFF", linewidth=0.5, height=0.72)
+
+    left.set_xlim(-0.42, -0.34)
+    right.set_xlim(-0.02, 0.042)
+    left.set_yticks(y)
+    left.set_yticklabels(data["signature"])
+    right.tick_params(axis="y", left=False, labelleft=False)
+    left.spines["right"].set_visible(False)
+    right.spines["left"].set_visible(False)
+    left.tick_params(right=False)
+    right.tick_params(left=False)
+
+    diagonal = 0.014
+    kwargs = dict(transform=left.transAxes, color="#444444", clip_on=False, lw=0.8)
+    left.plot((1 - diagonal, 1 + diagonal), (-diagonal, +diagonal), **kwargs)
+    left.plot((1 - diagonal, 1 + diagonal), (1 - diagonal, 1 + diagonal), **kwargs)
+    kwargs.update(transform=right.transAxes)
+    right.plot((-diagonal, +diagonal), (-diagonal, +diagonal), **kwargs)
+    right.plot((-diagonal, +diagonal), (1 - diagonal, 1 + diagonal), **kwargs)
+
+    for i, row in data.iterrows():
+        right.text(0.041, i, fdr_label(row["FDR"]), va="center", ha="right", fontsize=8.2)
+
+    fig.supxlabel("Mean logFC in MP-high vs MP-low tumor epithelial cells", y=0.04)
+    fig.suptitle("GSE176031: all predefined core epithelial-state programs", y=0.98, fontsize=11)
+    fig.text(
+        0.5,
+        0.91,
+        "Two-sided gene-set rank tests; broken x-axis preserves the full AR-luminal effect",
+        ha="center",
+        fontsize=8.5,
+        color="#5F6368",
+    )
+    sns.despine(ax=left, right=True)
+    sns.despine(ax=right, left=True)
+    fig.subplots_adjust(left=0.22, right=0.98, bottom=0.17, top=0.85)
+    fig.savefig(FIGS / "GSE176031_core_panel_two_sided_FDR.pdf")
+    plt.close(fig)
+
+
+def read_gzip_lines(path: Path) -> list[str]:
+    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+        return [line.rstrip("\n") for line in handle]
+
+
+def load_spatial_expression():
+    raw = RAW_ROOT / "GSE230282_spatial"
+    prefix = "GSM7211257_EHU-W3"
+    barcodes = read_gzip_lines(raw / f"{prefix}_barcodes.tsv.gz")
+    features = pd.read_csv(
+        raw / f"{prefix}_features.tsv.gz",
+        sep="\t",
+        header=None,
+        names=["gene_id", "gene_symbol", "feature_type"],
+        compression="gzip",
+    )
+    matrix = mmread(str(raw / f"{prefix}_matrix.mtx.gz")).tocsr()
+    positions = pd.read_csv(raw / f"{prefix}_tissue_positions.csv.gz", compression="gzip")
+    totals = np.asarray(matrix.sum(axis=0)).ravel()
+    totals[totals == 0] = 1
+    norm = matrix @ sparse.diags(1e4 / totals)
+    norm.data = np.log1p(norm.data)
+    spots = positions.merge(pd.DataFrame({"barcode": barcodes}), on="barcode", how="right")
+    in_tissue = spots["in_tissue"].eq(1).to_numpy()
+    return features, norm[:, in_tissue].tocsr(), spots.loc[in_tissue].reset_index(drop=True)
+
+
+def score_signature(expr, features: pd.DataFrame, genes: list[str]) -> tuple[np.ndarray, list[str]]:
+    present = sorted(set(features.loc[features["gene_symbol"].isin(genes), "gene_symbol"].astype(str)))
+    idx = features.index[features["gene_symbol"].isin(present)].to_numpy()
+    return np.asarray(expr[idx, :].mean(axis=0)).ravel(), present
+
+
+def spatial_core_panel() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    features, expr, spots = load_spatial_expression()
+    existing = pd.read_csv(
+        RESULT_ROOT / "specificity_controls" / "GSE230282_spatial_hypo_hyper_scores.tsv",
+        sep="\t",
+    )
+    score_table = spots[["barcode"]].copy()
+    overlap_rows = []
+    for signature, genes in CORE_SIGNATURES.items():
+        values, present = score_signature(expr, features, genes)
+        score_table[f"{signature}_score"] = values
+        overlap_rows.append(
+            {
+                "signature": signature,
+                "n_genes_defined": len(genes),
+                "n_genes_present": len(present),
+                "present_genes": ",".join(present),
+            }
+        )
+    meta = existing[
+        [
+            "barcode",
+            "Epithelial_score",
+            "MP_hypomethylated_promoter_score",
+            "MP_hypo_minus_hyper_score",
+        ]
+    ].merge(score_table, on="barcode", how="inner")
+    pd.DataFrame(overlap_rows).to_csv(OUT / "GSE230282_core_panel_gene_overlap.tsv", sep="\t", index=False)
+    meta.to_csv(OUT / "GSE230282_core_panel_spot_scores.tsv", sep="\t", index=False)
+
+    epithelial = meta[meta["Epithelial_score"] >= meta["Epithelial_score"].median()].copy()
+    corr_rows = []
+    for signature in CORE_SIGNATURES:
+        col = f"{signature}_score"
+        valid = epithelial[["MP_hypo_minus_hyper_score", col]].dropna()
+        r, pvalue = stats.spearmanr(valid["MP_hypo_minus_hyper_score"], valid[col])
+        corr_rows.append(
+            {
+                "signature": signature,
+                "spearman_r": r,
+                "pvalue_two_sided": pvalue,
+                "n_spots": len(valid),
+            }
+        )
+    correlations = pd.DataFrame(corr_rows)
+    correlations["FDR"] = bh_fdr(correlations["pvalue_two_sided"])
+    correlations.to_csv(OUT / "GSE230282_epithelial_core_panel_continuous_correlations.tsv", sep="\t", index=False)
+
+    high_cut = epithelial["MP_hypomethylated_promoter_score"].quantile(0.75)
+    low_cut = epithelial["MP_hypomethylated_promoter_score"].quantile(0.25)
+    high = epithelial[epithelial["MP_hypomethylated_promoter_score"] >= high_cut]
+    low = epithelial[epithelial["MP_hypomethylated_promoter_score"] <= low_cut]
+    comparison_rows = []
+    for signature in CORE_SIGNATURES:
+        col = f"{signature}_score"
+        stat, pvalue = stats.mannwhitneyu(high[col].dropna(), low[col].dropna(), alternative="two-sided")
+        comparison_rows.append(
+            {
+                "signature": signature,
+                "median_MP_high": high[col].median(),
+                "median_MP_low": low[col].median(),
+                "median_difference_high_minus_low": high[col].median() - low[col].median(),
+                "pvalue_two_sided": pvalue,
+                "n_high": len(high),
+                "n_low": len(low),
+            }
+        )
+    comparisons = pd.DataFrame(comparison_rows)
+    comparisons["FDR"] = bh_fdr(comparisons["pvalue_two_sided"])
+    comparisons.to_csv(OUT / "GSE230282_epithelial_core_panel_MP_high_low_tests.tsv", sep="\t", index=False)
+    return meta, correlations, comparisons
+
+
+def plot_directional_bars(data: pd.DataFrame, value_col: str, xlabel: str, title: str, filename: str) -> None:
+    plot = data.set_index("signature").loc[DISPLAY_ORDER].reset_index()
+    values = plot[value_col]
+    colors = [POSITIVE if value >= 0 else NEGATIVE for value in values]
+    fig, ax = plt.subplots(figsize=(6.2, 4.0))
+    ax.barh(plot["signature"], values, color=colors, edgecolor="#FFFFFF", linewidth=0.5)
+    ax.axvline(0, color="#444444", lw=0.8)
+    span = max(abs(values.min()), abs(values.max()))
+    ax.set_xlim(values.min() - span * 0.18, values.max() + span * 0.42)
+    for i, row in plot.iterrows():
+        ax.text(ax.get_xlim()[1] - span * 0.02, i, fdr_label(row["FDR"]), va="center", ha="right", fontsize=8.2)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("")
+    ax.set_title(title)
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(FIGS / filename)
+    plt.close(fig)
+
+
+def clinical_pairwise() -> tuple[pd.DataFrame, pd.DataFrame]:
+    clinical = pd.read_csv(
+        RESULT_ROOT / "TCGA_PRAD_clinical_aggressive_state" / "TCGA_PRAD_clinical_MP_scores.tsv",
+        sep="\t",
+    )
+    score = "MP_shortlist_expression_score"
+    specifications = {
+        "Gleason_group": ["<=6", "7", ">=8"],
+        "T_group": ["T2", "T3/T4"],
+        "BCR_status": ["No BCR", "BCR"],
+    }
+    overall_rows = []
+    pairwise_rows = []
+    for group, order in specifications.items():
+        sub = clinical[[score, group]].dropna()
+        sub = sub[sub[group].isin(order)]
+        samples = [sub.loc[sub[group].eq(level), score] for level in order]
+        if len(order) == 3:
+            statistic, pvalue = stats.kruskal(*samples)
+            test = "Kruskal-Wallis"
+        else:
+            statistic, pvalue = stats.mannwhitneyu(samples[0], samples[1], alternative="two-sided")
+            test = "Mann-Whitney"
+        overall_rows.append(
+            {
+                "clinical_group": group,
+                "test": test,
+                "statistic": statistic,
+                "pvalue": pvalue,
+                "n": len(sub),
+            }
+        )
+        for i in range(len(order)):
+            for j in range(i + 1, len(order)):
+                statistic, pvalue = stats.mannwhitneyu(samples[i], samples[j], alternative="two-sided")
+                pairwise_rows.append(
+                    {
+                        "clinical_group": group,
+                        "group_1": order[i],
+                        "group_2": order[j],
+                        "statistic": statistic,
+                        "pvalue": pvalue,
+                    }
+                )
+    overall = pd.DataFrame(overall_rows)
+    overall["FDR"] = bh_fdr(overall["pvalue"])
+    pairwise = pd.DataFrame(pairwise_rows)
+    pairwise["FDR"] = np.nan
+    for group, indices in pairwise.groupby("clinical_group").groups.items():
+        pairwise.loc[indices, "FDR"] = bh_fdr(pairwise.loc[indices, "pvalue"])
+    overall.to_csv(OUT / "TCGA_PRAD_clinical_overall_tests.tsv", sep="\t", index=False)
+    pairwise.to_csv(OUT / "TCGA_PRAD_clinical_pairwise_tests.tsv", sep="\t", index=False)
+    return clinical, overall, pairwise
+
+
+def add_bracket(ax, x1, x2, y, height, label):
+    ax.plot([x1, x1, x2, x2], [y, y + height, y + height, y], color="#555555", lw=0.75)
+    ax.text((x1 + x2) / 2, y + height * 1.15, label, ha="center", va="bottom", fontsize=7.2)
+
+
+def plot_clinical(clinical: pd.DataFrame, overall: pd.DataFrame, pairwise: pd.DataFrame) -> None:
+    score = "MP_shortlist_expression_score"
+    panels = [
+        ("Gleason_group", ["<=6", "7", ">=8"], "Gleason score"),
+        ("T_group", ["T2", "T3/T4"], "Pathologic T stage"),
+        ("BCR_status", ["No BCR", "BCR"], "Biochemical recurrence"),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 4.15), sharey=True)
+    for ax, (group, order, title) in zip(axes, panels):
+        sub = clinical[[score, group]].dropna()
+        sns.boxplot(
+            data=sub,
+            x=group,
+            y=score,
+            order=order,
+            color="#EDF1F4",
+            width=0.55,
+            fliersize=0,
+            ax=ax,
+        )
+        sns.stripplot(
+            data=sub,
+            x=group,
+            y=score,
+            order=order,
+            color=POINT,
+            size=2.0,
+            alpha=0.45,
+            jitter=0.22,
+            ax=ax,
+        )
+        overall_fdr = overall.loc[overall["clinical_group"].eq(group), "FDR"].iloc[0]
+        ax.set_title(title, fontsize=10.5, pad=8)
+        ax.text(
+            0.02,
+            0.98,
+            f"Overall {fdr_label(overall_fdr)}",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=7.8,
+            color="#555555",
+        )
+        ax.set_xlabel("")
+        ax.set_ylabel("MP-related expression score" if ax is axes[0] else "")
+        ax.tick_params(axis="x", rotation=20)
+        group_pairs = pairwise[pairwise["clinical_group"].eq(group)]
+        ymin, ymax = sub[score].min(), sub[score].max()
+        span = ymax - ymin
+        start = ymax + span * 0.035
+        if len(order) == 3:
+            pairs = [(0, 1), (1, 2), (0, 2)]
+            for k, (x1, x2) in enumerate(pairs):
+                row = group_pairs[
+                    group_pairs["group_1"].eq(order[x1]) & group_pairs["group_2"].eq(order[x2])
+                ].iloc[0]
+                add_bracket(ax, x1, x2, start + k * span * 0.105, span * 0.018, fdr_label(row["FDR"]))
+            ax.set_ylim(ymin - span * 0.08, ymax + span * 0.48)
+        else:
+            row = group_pairs.iloc[0]
+            add_bracket(ax, 0, 1, start, span * 0.025, fdr_label(row["FDR"]))
+            ax.set_ylim(ymin - span * 0.08, ymax + span * 0.25)
+    sns.despine()
+    fig.tight_layout(w_pad=0.9)
+    fig.savefig(FIGS / "TCGA_PRAD_clinical_aggressiveness_overall_pairwise_FDR.pdf")
+    plt.close(fig)
+
+
+def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    FIGS.mkdir(parents=True, exist_ok=True)
+    setup_style()
+
+    scrna = scrna_core_panel()
+    plot_scrna(scrna)
+
+    _meta, spatial_corr, spatial_high_low = spatial_core_panel()
+    plot_directional_bars(
+        spatial_corr,
+        "spearman_r",
+        "Spearman r in epithelial-enriched spots",
+        "GSE230282: continuous correlations across the unified core panel",
+        "GSE230282_core_panel_continuous_correlations_FDR.pdf",
+    )
+    plot_directional_bars(
+        spatial_high_low,
+        "median_difference_high_minus_low",
+        "Median difference: MP-high minus MP-low epithelial-enriched spots",
+        "GSE230282: MP-high vs MP-low across the unified core panel",
+        "GSE230282_core_panel_epithelial_MP_high_low_FDR.pdf",
+    )
+
+    clinical, overall, pairwise = clinical_pairwise()
+    plot_clinical(clinical, overall, pairwise)
+    print(FIGS)
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: build_result2_final_corrected_spatial_panel_20260608.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\build_result2_final_corrected_spatial_panel_20260608.py
+====================================================================================================
+
+from __future__ import annotations
+
+import csv
+import shutil
+import textwrap
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
+from pptx.util import Inches, Pt
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+DESKTOP = Path(r"C:\Users\徐涌乐\Desktop\预转移")
+OUT = BASE / "04_figures_pdf" / "external_omics_validation" / "Result2_FINAL_CORRECTED_20260608"
+PDF_BUNDLE = BASE / "04_figures_pdf" / "external_omics_validation" / "Result2_FINAL_CORRECTED_20260608_sorted_PDFs"
+PPT_OUT = DESKTOP / "MP_Result2_external_validation_FINAL_corrected_spatial_panel_20260608.pptx"
+
+SC_FIG = BASE / "04_figures_pdf" / "external_omics_validation" / "Result2_FINAL_20260608" / "01_GSE176031_scRNA_core_programs_FDR.png"
+SC_PDF = BASE / "04_figures_pdf" / "external_omics_validation" / "Result2_FINAL_20260608" / "01_GSE176031_scRNA_core_programs_FDR.pdf"
+SPEC = BASE / "03_analysis_results" / "external_omics_validation" / "specificity_controls"
+
+PANEL = ["Epithelial", "AR_luminal", "Proliferation", "Neuroendocrine", "Stromal_ECM"]
+POSITIVE = "#F9BEBB"
+NEGATIVE = "#B0C9DE"
+TEXT = "#202124"
+MUTED = "#5F6368"
+GRID = "#DADCE0"
+
+
+def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    candidates = [
+        r"C:\Windows\Fonts\arialbd.ttf" if bold else r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc",
+    ]
+    for path in candidates:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default()
+
+
+def read_rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
+
+
+def fdr_label(value: float) -> str:
+    if value == 0 or value < 1e-20:
+        return "FDR<1e-20"
+    if value < 0.001:
+        return f"FDR={value:.1e}"
+    return f"FDR={value:.3f}".rstrip("0").rstrip(".")
+
+
+def save_pdf_from_png(png: Path, pdf: Path) -> None:
+    image = Image.open(png).convert("RGB")
+    image.save(pdf, "PDF", resolution=300.0)
+
+
+def panel_sort_key(order: list[str]):
+    rank = {program: idx for idx, program in enumerate(order)}
+    return lambda row: rank.get(row["program"], len(rank))
+
+
+def draw_bar_chart(
+    rows: list[dict[str, str]],
+    value_key: str,
+    label_key: str,
+    title: str,
+    xlabel: str,
+    output_stem: str,
+    xlim: tuple[float, float],
+) -> tuple[Path, Path]:
+    width, height = 2100, 1350
+    img = Image.new("RGB", (width, height), "white")
+    d = ImageDraw.Draw(img)
+    f_title, f_axis, f_tick, f_note = font(48, True), font(36), font(31), font(26)
+    left, top, plot_w, plot_h = 420, 230, 1150, 780
+    x0, x1 = xlim
+    zero_x = left + (0 - x0) / (x1 - x0) * plot_w
+    d.text((width // 2, 80), title, anchor="mm", fill=TEXT, font=f_title)
+    d.line((left, top, left, top + plot_h), fill="#444444", width=4)
+    d.line((left, top + plot_h, left + plot_w, top + plot_h), fill="#444444", width=4)
+    d.line((zero_x, top, zero_x, top + plot_h), fill="#444444", width=3)
+    n = len(rows)
+    gap = plot_h / n
+    bar_h = int(gap * 0.58)
+    for i, row in enumerate(rows):
+        program = row[label_key]
+        value = float(row[value_key])
+        fdr = float(row["FDR"])
+        y = int(top + i * gap + gap / 2)
+        x = left + (value - x0) / (x1 - x0) * plot_w
+        color = POSITIVE if value >= 0 else NEGATIVE
+        d.text((left - 28, y), program, anchor="rm", fill=TEXT, font=f_axis)
+        d.rectangle((min(zero_x, x), y - bar_h // 2, max(zero_x, x), y + bar_h // 2), fill=color)
+        label_x = left + plot_w + 30
+        d.text((label_x, y), fdr_label(fdr), anchor="lm", fill=TEXT, font=f_tick)
+    for tick in nice_ticks(xlim):
+        tx = left + (tick - x0) / (x1 - x0) * plot_w
+        d.line((tx, top + plot_h, tx, top + plot_h + 16), fill="#444444", width=3)
+        d.text((tx, top + plot_h + 55), f"{tick:g}", anchor="mm", fill=TEXT, font=f_tick)
+    d.text((left + plot_w / 2, height - 145), xlabel, anchor="mm", fill=TEXT, font=f_axis)
+    d.text(
+        (left + plot_w / 2, height - 60),
+        "Primary spatial panel is ordered by the continuous MP hypo-minus-hyper spatial association.",
+        anchor="mm",
+        fill=MUTED,
+        font=f_note,
+    )
+    png = OUT / f"{output_stem}.png"
+    pdf = OUT / f"{output_stem}.pdf"
+    img.save(png)
+    save_pdf_from_png(png, pdf)
+    return png, pdf
+
+
+def nice_ticks(xlim: tuple[float, float]) -> list[float]:
+    lo, hi = xlim
+    if lo <= -1:
+        return [-1.0, -0.5, 0.0, 0.5, 1.0]
+    return [-0.6, -0.3, 0.0, 0.3, 0.6]
+
+
+def draw_heatmap(output_stem: str, program_order: list[str]) -> tuple[Path, Path]:
+    rows = read_rows(SPEC / "GSE230282_spatial_hypo_hyper_correlations.tsv")
+    scores = [
+        ("MP_hypomethylated_promoter_score", "Hypomethylated"),
+        ("MP_hypermethylated_promoter_score", "Hypermethylated"),
+        ("MP_hypo_minus_hyper_score", "Hypo-minus-hyper"),
+    ]
+    lookup = {(r["score"], r["program"]): r for r in rows}
+    width, height = 2100, 1350
+    img = Image.new("RGB", (width, height), "white")
+    d = ImageDraw.Draw(img)
+    f_title, f_axis, f_cell, f_bar = font(48, True), font(34), font(27), font(30)
+    d.text((width // 2, 80), "GSE230282: directional hypo/hyper promoter controls", anchor="mm", fill=TEXT, font=f_title)
+    left, top, cell_w, cell_h = 410, 210, 405, 190
+    for j, (_, label) in enumerate(scores):
+        d.text((left + j * cell_w + cell_w / 2, top + len(program_order) * cell_h + 55), label, anchor="mm", fill=TEXT, font=f_axis)
+    for i, program in enumerate(program_order):
+        d.text((left - 30, top + i * cell_h + cell_h / 2), program, anchor="rm", fill=TEXT, font=f_axis)
+        for j, (score, _) in enumerate(scores):
+            row = lookup[(score, program)]
+            r = float(row["spearman_r"])
+            color = diverge(r)
+            x, y = left + j * cell_w, top + i * cell_h
+            d.rectangle((x, y, x + cell_w, y + cell_h), fill=color, outline="white", width=3)
+            d.text(
+                (x + cell_w / 2, y + cell_h / 2),
+                f"r={r:.2f}\n{fdr_label(float(row['FDR']))}",
+                anchor="mm",
+                align="center",
+                fill=TEXT,
+                font=f_cell,
+            )
+    # Simple color legend
+    lx, ly = left + 3 * cell_w + 115, top + 80
+    for k in range(330):
+        value = 0.6 - 1.2 * k / 329
+        d.line((lx, ly + k, lx + 35, ly + k), fill=diverge(value), width=1)
+    d.text((lx + 70, ly), "0.6", anchor="lm", fill=TEXT, font=f_bar)
+    d.text((lx + 70, ly + 165), "0", anchor="lm", fill=TEXT, font=f_bar)
+    d.text((lx + 70, ly + 330), "-0.6", anchor="lm", fill=TEXT, font=f_bar)
+    d.text((lx + 20, ly + 400), "Spearman r", anchor="mm", fill=TEXT, font=f_bar)
+    png = OUT / f"{output_stem}.png"
+    pdf = OUT / f"{output_stem}.pdf"
+    img.save(png)
+    save_pdf_from_png(png, pdf)
+    return png, pdf
+
+
+def diverge(value: float) -> str:
+    value = max(-0.6, min(0.6, value)) / 0.6
+    neg = (176, 201, 222)
+    pos = (249, 190, 187)
+    white = (255, 255, 255)
+    if value >= 0:
+        base, t = pos, value
+    else:
+        base, t = neg, -value
+    rgb = tuple(int(white[i] * (1 - t) + base[i] * t) for i in range(3))
+    return "#%02x%02x%02x" % rgb
+
+
+def rgb(value: str) -> RGBColor:
+    return RGBColor.from_string(value.strip("#"))
+
+
+def add_text(slide, text: str, x: float, y: float, w: float, h: float, size: float, *, bold=False, color=TEXT, align=PP_ALIGN.LEFT):
+    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    frame = box.text_frame
+    frame.clear()
+    frame.word_wrap = True
+    frame.margin_left = 0
+    frame.margin_right = 0
+    frame.margin_top = 0
+    frame.margin_bottom = 0
+    for idx, line in enumerate(text.split("\n")):
+        p = frame.paragraphs[0] if idx == 0 else frame.add_paragraph()
+        p.alignment = align
+        p.space_after = Pt(4)
+        run = p.add_run()
+        run.text = line
+        run.font.name = "Microsoft YaHei"
+        run.font.size = Pt(size)
+        run.font.bold = bold
+        run.font.color.rgb = rgb(color)
+    return box
+
+
+def add_header(slide, title: str, subtitle: str, page: str) -> None:
+    add_text(slide, title, 0.55, 0.28, 11.7, 0.42, 22, bold=True)
+    add_text(slide, subtitle, 0.56, 0.76, 11.8, 0.34, 10.5, color=MUTED)
+    line = slide.shapes.add_shape(1, Inches(0.55), Inches(1.09), Inches(12.23), Inches(0.012))
+    line.fill.solid()
+    line.fill.fore_color.rgb = rgb(GRID)
+    line.line.fill.background()
+    add_text(slide, page, 12.25, 7.15, 0.5, 0.18, 8.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+
+def add_figure_slide(prs, title: str, subtitle: str, image: Path, why: str, conclusion: str, page: str):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    add_header(slide, title, subtitle, page)
+    slide.shapes.add_picture(str(image), Inches(0.52), Inches(1.25), width=Inches(7.0), height=Inches(5.25))
+    add_text(slide, "为什么这样做", 7.9, 1.40, 4.7, 0.30, 13, bold=True)
+    add_text(slide, why, 7.9, 1.82, 4.65, 2.4, 13.0)
+    callout = slide.shapes.add_shape(1, Inches(7.82), Inches(4.48), Inches(4.75), Inches(1.45))
+    callout.fill.solid()
+    callout.fill.fore_color.rgb = rgb("F7F8F9")
+    callout.line.color.rgb = rgb(GRID)
+    add_text(slide, "结论", 8.05, 4.68, 4.2, 0.28, 13, bold=True)
+    add_text(slide, conclusion, 8.05, 5.08, 4.2, 0.64, 13.8, bold=True)
+
+
+def wrap(text: str, width: int = 36) -> str:
+    return "\n".join(textwrap.wrap(text, width=width))
+
+
+def build_ppt(figs: dict[str, Path]) -> None:
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    add_text(slide, "结果2：MP相关启动子重塑的外部转录组验证", 0.62, 0.45, 12.0, 0.55, 25, bold=True)
+    add_text(slide, "空间三张图统一使用同一套主面板，避免ECM/基质定义混用", 0.64, 1.12, 11.6, 0.38, 13, color=MUTED)
+    add_text(slide, "scRNA-seq", 0.75, 2.05, 2.25, 0.35, 17, bold=True)
+    add_text(slide, "观测单位：肿瘤上皮细胞\n目的：验证细胞内在功能状态\n主面板：6个预定义上皮状态/功能程序\n包含 migration/invasion、AR、NE、增殖等", 0.75, 2.55, 4.95, 2.35, 14)
+    add_text(slide, "Spatial transcriptomics", 6.75, 2.05, 3.6, 0.35, 17, bold=True)
+    add_text(slide, "观测单位：空间spot，含混合细胞信号\n目的：验证组织定位和组成控制\n主面板：Epithelial、AR_luminal、Proliferation、Neuroendocrine、Stromal_ECM\n不把 ECM_remodeling 与 Stromal_ECM 混用", 6.75, 2.55, 5.55, 2.65, 14)
+    line = slide.shapes.add_shape(1, Inches(6.34), Inches(1.92), Inches(0.012), Inches(3.55))
+    line.fill.solid()
+    line.fill.fore_color.rgb = rgb(GRID)
+    line.line.fill.background()
+    add_text(slide, "展示原则：同一类空间分析使用完全一致的5个条目；migration/invasion只保留在scRNA和敏感性分析中。", 0.75, 5.85, 11.75, 0.62, 15, bold=True)
+    add_text(slide, "1", 12.25, 7.15, 0.5, 0.18, 8.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+    add_figure_slide(
+        prs,
+        "GSE176031 scRNA-seq：MP-high肿瘤上皮细胞的完整核心程序面板",
+        "scRNA保留6个细胞内功能程序；粉红为正向、浅蓝为负向；显示双侧FDR",
+        figs["sc"],
+        "为了检验MP相关启动子程序是否对应肿瘤上皮细胞内在状态，使用GSE176031肿瘤上皮细胞的MP-high与MP-low差异表达排序，对6个预定义程序进行双侧基因集秩检验。",
+        "MP-high细胞呈low-AR、migration/invasion与NE-like倾向；增殖为正向趋势。",
+        "2",
+    )
+    add_figure_slide(
+        prs,
+        "GSE230282空间转录组：统一空间主面板的连续相关",
+        "5个条目与后续方向性对照完全一致：Epithelial、AR、Proliferation、NE、Stromal_ECM",
+        figs["corr"],
+        "为了在组织尺度验证MP程序的空间状态，使用MP hypo-minus-hyper分数与同一套5项空间主面板做连续相关；Epithelial和Stromal_ECM用于判断信号是否受组成影响。",
+        "MP程序与AR_luminal显著负相关，与Epithelial、NE和Proliferation正相关；Stromal_ECM近零。",
+        "3",
+    )
+    add_figure_slide(
+        prs,
+        "GSE230282上皮富集spots复验：MP-high与MP-low的统一空间主面板",
+        "同一套5个条目，与连续相关和hypo/hyper方向性对照保持一致",
+        figs["highlow"],
+        "为了降低空间spot细胞组成影响，仅在上皮富集spots内比较MP-high与MP-low区域，并继续使用完全相同的5项空间主面板。",
+        "MP-high区域Epithelial、NE和Proliferation更高，AR_luminal更低；Stromal_ECM轻度更低。",
+        "4",
+    )
+    add_figure_slide(
+        prs,
+        "方向性对照：hypo与hyper启动子基因支持MP状态特异性",
+        "每个格子显示Spearman r与双侧FDR；条目与两张空间主图完全一致",
+        figs["heat"],
+        "为了检验结果是否符合甲基化方向，分别构建低甲基化、高甲基化及hypo-minus-hyper启动子表达分数，并与同一套5项空间主面板相关。",
+        "低甲基化方向强化low-AR、high-NE和high-proliferation；hypo-minus-hyper与Stromal_ECM近零。",
+        "5",
+    )
+    prs.save(PPT_OUT)
+
+
+def bundle_pdfs(pdf_paths: list[Path]) -> None:
+    PDF_BUNDLE.mkdir(parents=True, exist_ok=True)
+    for pdf in pdf_paths:
+        shutil.copy2(pdf, PDF_BUNDLE / pdf.name)
+
+
+def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(SC_FIG, OUT / "01_GSE176031_scRNA_core_programs_FDR.png")
+    shutil.copy2(SC_PDF, OUT / "01_GSE176031_scRNA_core_programs_FDR.pdf")
+
+    corr_rows = [
+        {"program": row["program"], "value": row["spearman_r"], "FDR": row["FDR"]}
+        for row in read_rows(SPEC / "GSE230282_spatial_hypo_hyper_correlations.tsv")
+        if row["score"] == "MP_hypo_minus_hyper_score" and row["program"] in PANEL
+    ]
+    spatial_order = [row["program"] for row in sorted(corr_rows, key=lambda r: float(r["value"]), reverse=True)]
+    corr_rows = sorted(corr_rows, key=panel_sort_key(spatial_order))
+    corr_png, corr_pdf = draw_bar_chart(
+        corr_rows,
+        "value",
+        "program",
+        "GSE230282: unified spatial primary panel",
+        "Spearman r with MP hypo-minus-hyper score",
+        "02_GSE230282_unified_spatial_panel_continuous_FDR",
+        (-0.65, 0.60),
+    )
+
+    highlow_rows = [
+        {"program": row["program"], "value": row["median_difference_high_minus_low"], "FDR": row["FDR"]}
+        for row in read_rows(SPEC / "GSE230282_epithelial_enriched_spot_MP_high_low_tests.tsv")
+        if row["program"] in PANEL
+    ]
+    highlow_rows = sorted(highlow_rows, key=panel_sort_key(spatial_order))
+    highlow_png, highlow_pdf = draw_bar_chart(
+        highlow_rows,
+        "value",
+        "program",
+        "GSE230282: MP-high vs MP-low in epithelial-enriched spots",
+        "Median difference: MP-high minus MP-low epithelial-enriched spots",
+        "03_GSE230282_unified_spatial_panel_MP_high_low_FDR",
+        (-1.20, 1.30),
+    )
+    heat_png, heat_pdf = draw_heatmap("04_GSE230282_unified_hypo_hyper_directional_controls_FDR", spatial_order)
+    bundle_pdfs([OUT / "01_GSE176031_scRNA_core_programs_FDR.pdf", corr_pdf, highlow_pdf, heat_pdf])
+    figs = {
+        "sc": OUT / "01_GSE176031_scRNA_core_programs_FDR.png",
+        "corr": corr_png,
+        "highlow": highlow_png,
+        "heat": heat_png,
+    }
+    build_ppt(figs)
+    print(OUT)
+    print(PDF_BUNDLE)
+    print(PPT_OUT)
+
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================================================
+FILE: make_figure2L_tcga_clinical_pairwise.py
+SOURCE: D:\prostate cancer\metastasis_ready_methylation_analysis\06_scripts\external_omics_validation\make_figure2L_tcga_clinical_pairwise.py
+====================================================================================================
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy import stats
+
+
+BASE = Path(r"D:\prostate cancer\metastasis_ready_methylation_analysis")
+RESULTS = BASE / "03_analysis_results" / "external_omics_validation"
+CLINICAL = RESULTS / "TCGA_PRAD_clinical_aggressive_state" / "TCGA_PRAD_clinical_MP_scores.tsv"
+OUT = BASE / "04_figures_pdf" / "external_omics_validation" / "figure2L_pairwise_TCGA_clinical"
+DESKTOP_OUT = Path.home() / "Desktop" / "预转移"
+
+SCORE = "MP_shortlist_expression_score"
+PANELS = [
+    ("Gleason_group", ["<=6", "7", ">=8"], "Gleason score"),
+    ("T_group", ["T2", "T3/T4"], "Pathologic T stage"),
+    ("BCR_status", ["No BCR", "BCR"], "Biochemical recurrence"),
+]
+
+
+def bh_fdr(pvalues: list[float]) -> np.ndarray:
+    pvalues = np.asarray(pvalues, dtype=float)
+    result = np.full(len(pvalues), np.nan)
+    ok = np.isfinite(pvalues)
+    if ok.sum() == 0:
+        return result
+    order = np.argsort(pvalues[ok])
+    ranked = pvalues[ok][order] * ok.sum() / np.arange(1, ok.sum() + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    values = np.empty(ok.sum())
+    values[order] = np.clip(ranked, 0, 1)
+    result[ok] = values
+    return result
+
+
+def fdr_label(value: float) -> str:
+    if not np.isfinite(value):
+        return "FDR=NA"
+    if value < 1e-20:
+        return "FDR<1e-20"
+    if value < 0.001:
+        return f"FDR={value:.1e}"
+    return f"FDR={value:.3f}".rstrip("0").rstrip(".")
+
+
+def pairwise_tests(clinical: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for group, order, _title in PANELS:
+        sub = clinical[[SCORE, group]].dropna()
+        sub = sub[sub[group].isin(order)]
+        for i in range(len(order)):
+            for j in range(i + 1, len(order)):
+                a = sub.loc[sub[group].eq(order[i]), SCORE]
+                b = sub.loc[sub[group].eq(order[j]), SCORE]
+                statistic, pvalue = stats.mannwhitneyu(a, b, alternative="two-sided")
+                rows.append(
+                    {
+                        "clinical_group": group,
+                        "group_1": order[i],
+                        "group_2": order[j],
+                        "statistic": statistic,
+                        "pvalue": pvalue,
+                        "n_1": len(a),
+                        "n_2": len(b),
+                    }
+                )
+    tests = pd.DataFrame(rows)
+    tests["FDR"] = np.nan
+    for group, indices in tests.groupby("clinical_group").groups.items():
+        tests.loc[indices, "FDR"] = bh_fdr(tests.loc[indices, "pvalue"].tolist())
+    return tests
+
+
+def add_bracket(ax, x1: int, x2: int, y: float, h: float, label: str) -> None:
+    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], color="#333333", lw=0.85, clip_on=False)
+    ax.text((x1 + x2) / 2, y + h * 1.25, label, ha="center", va="bottom", fontsize=8.2, color="#222222")
+
+
+def plot_figure(clinical: pd.DataFrame, tests: pd.DataFrame) -> tuple[Path, Path]:
+    sns.set_theme(style="white", context="paper", font="Arial")
+    plt.rcParams.update(
+        {
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+            "axes.linewidth": 0.75,
+            "axes.labelcolor": "#202124",
+            "text.color": "#202124",
+            "xtick.color": "#202124",
+            "ytick.color": "#202124",
+        }
+    )
+    fig, axes = plt.subplots(1, 3, figsize=(9.7, 4.15), sharey=True)
+    for panel_idx, (ax, (group, order, title)) in enumerate(zip(axes, PANELS)):
+        sub = clinical[[SCORE, group]].dropna()
+        sub = sub[sub[group].isin(order)]
+        sns.boxplot(
+            data=sub,
+            x=group,
+            y=SCORE,
+            order=order,
+            ax=ax,
+            width=0.55,
+            color="#B9CEDD",
+            fliersize=0,
+            linewidth=0.9,
+            boxprops={"edgecolor": "#222222", "linewidth": 0.9},
+            medianprops={"color": "#222222", "linewidth": 1.0},
+            whiskerprops={"color": "#222222", "linewidth": 0.9},
+            capprops={"color": "#222222", "linewidth": 0.9},
+        )
+        ax.set_title(title, fontsize=11.5, pad=34)
+        ax.set_xlabel("")
+        ax.set_ylabel("MP-related expression score" if panel_idx == 0 else "")
+        ax.tick_params(axis="x", rotation=18, labelsize=9.5)
+        ax.tick_params(axis="y", labelsize=9.5)
+
+        ymin, ymax = sub[SCORE].min(), sub[SCORE].max()
+        span = ymax - ymin
+        group_tests = tests[tests["clinical_group"].eq(group)]
+        if len(order) == 3:
+            pairs = [(0, 1), (1, 2), (0, 2)]
+            starts = [ymax + span * 0.055, ymax + span * 0.175, ymax + span * 0.315]
+            for (x1, x2), y in zip(pairs, starts):
+                row = group_tests[group_tests["group_1"].eq(order[x1]) & group_tests["group_2"].eq(order[x2])].iloc[0]
+                add_bracket(ax, x1, x2, y, span * 0.025, fdr_label(float(row["FDR"])))
+            ax.set_ylim(ymin - span * 0.08, ymax + span * 0.74)
+        else:
+            row = group_tests.iloc[0]
+            add_bracket(ax, 0, 1, ymax + span * 0.085, span * 0.03, fdr_label(float(row["FDR"])))
+            ax.set_ylim(ymin - span * 0.08, ymax + span * 0.27)
+
+    sns.despine()
+    fig.tight_layout(w_pad=0.75)
+    OUT.mkdir(parents=True, exist_ok=True)
+    pdf = OUT / "Figure2L_TCGA_PRAD_clinicopathological_pairwise_FDR.pdf"
+    png = OUT / "Figure2L_TCGA_PRAD_clinicopathological_pairwise_FDR.png"
+    fig.savefig(pdf, bbox_inches="tight")
+    fig.savefig(png, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return pdf, png
+
+
+def main() -> None:
+    clinical = pd.read_csv(CLINICAL, sep="\t")
+    tests = pairwise_tests(clinical)
+    OUT.mkdir(parents=True, exist_ok=True)
+    tests.to_csv(OUT / "Figure2L_TCGA_PRAD_pairwise_tests.tsv", sep="\t", index=False)
+    pdf, png = plot_figure(clinical, tests)
+
+    DESKTOP_OUT.mkdir(parents=True, exist_ok=True)
+    for path in [pdf, png, OUT / "Figure2L_TCGA_PRAD_pairwise_tests.tsv"]:
+        target = DESKTOP_OUT / path.name
+        target.write_bytes(path.read_bytes())
+
+    print(pdf)
+    print(png)
+    print(OUT / "Figure2L_TCGA_PRAD_pairwise_tests.tsv")
+    print(DESKTOP_OUT)
+
+
+if __name__ == "__main__":
+    main()
+

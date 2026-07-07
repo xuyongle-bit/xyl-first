@@ -1,0 +1,693 @@
+#promoter#########
+library(tidyverse)
+library(irlba)
+setwd("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\promoter_matrix\\")
+## 读取收缩残差矩阵（更鲁棒）
+meth_mtx <- read.csv("mean_shrunken_residuals.csv", row.names=1) %>%
+  as.matrix()
+rownames(meth_mtx)<-gsub("_Testpaired_pe.deduplicated.sorted.bismark", "", rownames(meth_mtx))#去掉后缀
+meth_mtx<-t(meth_mtx)
+
+cell_groups<-read.csv("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-methscan\\cell_groups.csv",header = F)
+cell_groups$V1<-gsub("_Testpaired_pe.deduplicated.sorted.bismark", "", cell_groups$V1)#去掉后缀
+#按照分组排序
+cell_groups <- cell_groups[order(cell_groups$V2), ]
+
+
+index<-which(rownames(meth_mtx)%in%cell_groups$V1)
+
+meth_mtx<-meth_mtx[,cell_groups$V1]
+
+group<-cell_groups$V2
+# ==============================
+# 差异甲基化自动 Pipeline
+# 输入: meth_mtx (行=位点/区域, 列=细胞), group (向量, 长度等于列数)
+# 分组: group_A vs group_B
+# 方法: t-test, Wilcoxon, Fisher
+# 输出: 结果表 + 可选火山图
+# ==============================
+
+library(matrixStats)
+
+# ---------- 1. 基础检查 ----------
+stopifnot(length(group) == ncol(meth_mtx))
+stopifnot(all(group %in% c("group_A", "group_B")))
+
+# ---------- 2. 过滤 NA ----------
+keep <- rowMeans(!is.na(meth_mtx)) >= 0.3
+meth_mtx <- meth_mtx[keep, , drop = FALSE]
+message("过滤后保留 ", nrow(meth_mtx), " 个位点/区域")
+
+# ---------- 3. 定义三种检验 ----------
+run_tests <- function(x, g1, g2) {
+  # t-test
+  t_p <- tryCatch(t.test(x[g1], x[g2])$p.value, error = function(e) NA)
+  
+  # Wilcoxon
+  w_p <- tryCatch(wilcox.test(x[g1], x[g2])$p.value, error = function(e) NA)
+  
+  # Fisher (需要二值化)
+  bin_x <- ifelse(x > 0.5, 1, 0)  # 这里阈值可改
+  tbl <- table(bin_x, group = ifelse(!is.na(bin_x), group, NA))
+  f_p <- tryCatch(fisher.test(tbl)$p.value, error = function(e) NA)
+  
+  return(c(t_p, w_p, f_p))
+}
+
+# ---------- 4. 批量运行 ----------
+res <- t(apply(meth_mtx, 1, function(x) {
+  g1 <- !is.na(x) & group == "group_A"
+  g2 <- !is.na(x) & group == "group_B"
+  
+  if (sum(g1) >= 3 & sum(g2) >= 3) {
+    run_tests(x, g1, g2)
+  } else {
+    c(NA, NA, NA)
+  }
+}))
+
+colnames(res) <- c("pval_ttest", "pval_wilcox", "pval_fisher")
+
+# ---------- 5. 差异均值 ----------
+diff_means <- rowMeans(meth_mtx[, group == "group_A"], na.rm = TRUE) -
+  rowMeans(meth_mtx[, group == "group_B"], na.rm = TRUE)
+
+# ---------- 6. 整合结果 ----------
+final_res <- data.frame(
+  region = rownames(meth_mtx),
+  diff = diff_means,
+  res,
+  fdr_ttest = p.adjust(res[,1], method = "fdr"),
+  fdr_wilcox = p.adjust(res[,2], method = "fdr"),
+  fdr_fisher = p.adjust(res[,3], method = "fdr")
+)
+write.table(final_res, file = "D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-promoter\\final_res.bed", sep = "\t", quote = FALSE, row.names = FALSE, col.names = T)
+# ---------- 7. 筛选显著 ----------
+sig_res <- subset(final_res,
+                  (fdr_ttest < 0.05 & abs(diff) > 0.2) |
+                    (fdr_wilcox < 0.05 & abs(diff) > 0.2) |
+                    (fdr_fisher < 0.05 & abs(diff) > 0.2))
+
+message("显著差异区域数: ", nrow(sig_res))
+# ---------- 7. 分别筛选显著 
+sig_ttest <- subset(final_res, pval_ttest < 0.05 & abs(diff) > 0.2)
+sig_wilcox <- subset(final_res, pval_wilcox < 0.05 & abs(diff) > 0.2)
+sig_fisher <- subset(final_res, pval_fisher < 0.05 & abs(diff) > 0.2)
+
+message("显著差异区域数 (t-test): ", nrow(sig_ttest))
+message("显著差异区域数 (Wilcoxon): ", nrow(sig_wilcox))
+message("显著差异区域数 (Fisher): ", nrow(sig_fisher))
+index<-which(sig_ttest$region%in%sig_wilcox$region)
+# ---------- 统计上调 / 下调 ----------
+
+# 假设 sig_wilcox 已经有 rownames 且这些 rownames 就是 region 内容
+rn <- rownames(sig_wilcox)
+# 保留恰好两个点（即三组）的行
+keep <- sapply(strsplit(rn, "\\."), length) == 3
+sig_wilcox <- sig_wilcox[keep, , drop = FALSE]
+
+
+
+count_up_down <- function(df, method_name) {
+  up   <- sum(df$diff > 0.2, na.rm = TRUE)
+  down <- sum(df$diff < -0.2, na.rm = TRUE)
+  data.frame(
+    Method = method_name,
+    Up = up,
+    Down = down,
+    Total = nrow(df)
+  )
+}
+
+stats_summary <- rbind(
+  count_up_down(sig_ttest,  "t-test"),
+  count_up_down(sig_wilcox, "Wilcoxon"),
+  count_up_down(sig_fisher, "Fisher")
+)
+
+print(stats_summary)
+
+
+#卡P值就选Wilcoxon，卡fdr就选T检验的结果,在这里我选择了卡P值和Wilcoxon
+
+
+# ---------- 8. 可选火山图 ----------
+
+library(ggplot2)
+
+threshold <- -log10(0.05)
+
+ggplot(final_res, aes(x = diff, y = -log10(pval_wilcox))) +
+  geom_point(aes(color = ifelse(-log10(pval_wilcox) > threshold & diff < -0.2, 
+                                "显著低甲基化", 
+                                ifelse(-log10(pval_wilcox) > threshold & diff > 0.2, "显著高甲基化", "非显著"))), 
+             alpha = 0.6) +
+  geom_vline(xintercept = c(-0.2, 0.2), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = threshold, linetype = "dashed", color = "blue") +
+  theme_minimal() +
+  labs(x = "Methylation difference (group_A - group_B)",
+       y = "-log10(p-value, Wilcoxon)",
+       title = "Volcano plot (Wilcoxon test)") +
+  scale_color_manual(values = c("显著低甲基化" = "blue", "显著高甲基化" = "red", "非显著" = "grey")) +
+  theme(legend.title = element_blank())
+
+
+
+
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+threshold <- -log10(0.05)
+
+# 创建一个新列来标识显著差异的点
+final_res$significance <- ifelse(-log10(final_res$pval_wilcox) > threshold & final_res$diff < -0.2,
+                                 "显著低甲基化",
+                                 ifelse(-log10(final_res$pval_wilcox) > threshold & final_res$diff > 0.2,
+                                        "显著高甲基化", "非显著"))
+
+# 只显示最显著的前10个高甲基化和前10个低甲基化基因
+top_high <- final_res %>% 
+  filter(significance == "显著高甲基化") %>% 
+  arrange(desc(-log10(pval_wilcox))) %>% 
+  head(10)
+
+top_low <- final_res %>% 
+  filter(significance == "显著低甲基化") %>% 
+  arrange(desc(-log10(pval_wilcox))) %>% 
+  head(10)
+
+top_genes <- rbind(top_high, top_low)
+
+# 创建火山图
+ggplot(final_res, aes(x = diff, y = -log10(pval_wilcox))) +
+  geom_point(aes(color = significance), alpha = 0.6) +
+  geom_vline(xintercept = c(-0.2, 0.2), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = threshold, linetype = "dashed", color = "blue") +
+  
+  # 只为最显著的基因添加标签
+  geom_text_repel(
+    data = top_genes,  # 使用筛选后的数据
+    aes(label = region),  # 假设您的数据中有"gene"列
+    size = 3,
+    max.overlaps = 20,
+    box.padding = 0.5,
+    segment.color = "grey50",
+    segment.size = 0.5
+  ) +
+  
+  theme_minimal() +
+  labs(x = "Methylation difference (group_A - group_B)",
+       y = "-log10(p-value, Wilcoxon)",
+       title = "Volcano plot (Wilcoxon test)") +
+  scale_color_manual(values = c("显著低甲基化" = "blue", "显著高甲基化" = "red", "非显著" = "grey")) +
+  theme(legend.title = element_blank())
+#拆分region-----------------------------------------------
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+# 假设 sig_wilcox 已存在且有 region 列
+# 1. 先把 region 按点或下划线或其他分隔符分割为 chr 和 rest（示例以"."或"."后数字为分割）
+parts <- strsplit(as.character(sig_wilcox$region), "\\.")  # 用点分割
+
+# parts 是列表，每个元素通常像 c("X9","106696068","106699968")
+# 提取为矩阵（若始终为3部分）
+mat <- do.call(rbind, parts)
+
+# 2. 构建 chr,start,end 列
+chr_raw <- mat[,1]
+start   <- as.integer(mat[,2])
+end     <- as.integer(mat[,3])
+
+# 3. 处理 chr_raw 到目标 chr 名称规则
+# 如果 chr_raw 以 "X" 或 "Y" 单独或开头且后面跟着点表示 X/Y：
+# - 当 chr_raw 完全等于 "X" / "Y" 或等于 "X"（也适配 "X" 前缀情形），保留为 "X"/"Y"
+# - 否则，如果含有数字（如 "X9"、"9"、"chr9" 等），提取数字并加 "chr" 前缀
+chr <- ifelse(grepl("^X$", chr_raw) | grepl("^X$", toupper(chr_raw)),
+              "X",
+              ifelse(grepl("^Y$", chr_raw) | grepl("^Y$", toupper(chr_raw)),
+                     "Y",
+                     # 否则提取数字部分
+                     paste0("chr", gsub("^[A-Za-z]*", "", chr_raw))))
+
+# 4. 把结果放回数据框
+sig_wilcox$chr   <- chr
+sig_wilcox$start <- start
+sig_wilcox$end   <- end
+
+sig_wilcox<-sig_wilcox[-which(sig_wilcox$chr=="X"|sig_wilcox$chr=="Y"),]
+
+up_wilcox<-sig_wilcox[which(sig_wilcox$diff > 0.2 & sig_wilcox$pval_ttest < 0.05),]
+down_wilcox<-sig_wilcox[which(sig_wilcox$diff < -0.2 & sig_wilcox$pval_ttest < 0.05),]
+
+# up_wilcox<-up_wilcox[,c(10:12)]
+# down_wilcox<-down_wilcox[,c(10:12)]
+
+#导入包--------------------
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(DOSE)
+library(GenomicRanges)
+library(GenomicFeatures)
+library(annotatr)
+library(fgsea)
+library(tidyverse)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene) # 根据你的基因组版本选择
+library(GenomicRanges)
+########################读取差异甲基化位点,查看这些位点分布在哪些基因组区域----------------------
+setwd("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-promoter")
+sig_wilcox<-read.table("sig_wilcox.bed",header = T)   #差异VMR
+up_wilcox<-read.table("up_wilcox.bed",header = T)       #差异高VMR
+down_wilcox<-read.table("down_wilcox.bed",header = T)    #差异低VMR
+
+table(sig_wilcox$chr)
+
+#拆分高低甲基化组
+dmr_hypo<-down_wilcox
+dmr_hypo<-dmr_hypo[,10:12]
+dmr_hyper<-up_wilcox
+dmr_hyper<-dmr_hyper[,10:12]
+
+#################准备DMR数据并转换为GenomicRanges对象----------------------
+
+# 假设你的数据已经加载为dmr_data
+# 确保列名正确
+
+# 转换为GenomicRanges对象
+dmr_hypo <- makeGRangesFromDataFrame(dmr_hypo, 
+                                     keep.extra.columns = TRUE,
+                                     ignore.strand = TRUE)
+
+dmr_hyper <- makeGRangesFromDataFrame(dmr_hyper, 
+                                      keep.extra.columns = TRUE,
+                                      ignore.strand = TRUE)
+
+# 查看对象
+dmr_hypo
+dmr_hyper
+
+
+########################注释DMR到最近的基因-------------------------------
+
+
+# 使用ChIPseeker进行注释
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene # 根据你的基因组版本选择
+promoter_region <- getPromoters(TxDb = txdb, upstream = 2000, downstream = 2000)
+hypo_promoter <- subsetByOverlaps(dmr_hypo, promoter_region)
+hyper_promoter <- subsetByOverlaps(dmr_hyper, promoter_region)
+#只注释启动子区域
+
+#-1500bp ~ +500bp  经典 promoter  文献常用，平衡覆盖性和特异性
+#-1000bp ~ +100bp  严格 promoter  准确找启动子甲基化抑制效应
+hypo_anno <- annotatePeak(hypo_promoter, 
+                          tssRegion = c(-2000, 2000),
+                          TxDb = txdb,
+                          annoDb = "org.Hs.eg.db")
+
+hyper_anno <- annotatePeak(hyper_promoter, 
+                           tssRegion = c(-2000, 2000),
+                           TxDb = txdb,
+                           annoDb = "org.Hs.eg.db")
+
+# 查看注释结果
+head(as.data.frame(hypo_anno))
+
+# 可视化注释结果
+plotAnnoPie(hyper_anno)
+plotAnnoBar(hyper_anno)
+
+
+# 将注释结果转换为数据框------------------------------
+hypo_anno_df <- as.data.frame(hypo_anno)
+hyper_anno_df <- as.data.frame(hyper_anno)
+
+# 提取我们需要的列：VMR区域信息和对应的基因信息
+hypo_gene_mapping <- hypo_anno_df %>%
+  dplyr::select(seqnames, start, end, width, strand, 
+                annotation, geneId, SYMBOL, GENENAME, distanceToTSS) %>%
+  dplyr::rename(chr = seqnames, 
+                gene_id = geneId, 
+                gene_symbol = SYMBOL, 
+                gene_name = GENENAME)
+
+hyper_gene_mapping <- hyper_anno_df %>%
+  dplyr::select(seqnames, start, end, width, strand, 
+                annotation, geneId, SYMBOL, GENENAME, distanceToTSS) %>%
+  dplyr::rename(chr = seqnames, 
+                gene_id = geneId, 
+                gene_symbol = SYMBOL, 
+                gene_name = GENENAME)
+
+# 添加VMR类型列
+hypo_gene_mapping$vmr_type <- "hypo"
+hyper_gene_mapping$vmr_type <- "hyper"
+
+######################功能富集分析
+##########################基因本体(GO)富集分析
+
+# 提取所有邻近基因
+hypo_genes <-  as.data.frame(unique(as.data.frame(hypo_anno)$SYMBOL))
+colnames(hypo_genes)<-"gene"
+
+hyper_genes <- as.data.frame(unique(as.data.frame(hyper_anno)$SYMBOL))
+colnames(hyper_genes)<-"gene"
+
+#去除空基因
+hypo_genes<-hypo_genes[-11,]
+hyper_genes<-hyper_genes[-12,]
+
+
+# a<-intersect(hypo_genes$gene,hyper_genes$gene)
+# hypo_genes<-hypo_genes[-which(hypo_genes$gene%in%a),]
+# hyper_genes<-hyper_genes[-which(hyper_genes$gene%in%a),]
+#a<-intersect(hypo_genes,hyper_genes)
+
+#VNR#########
+library(tidyverse)
+library(irlba)
+setwd("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\VMR_matrix\\")
+## 读取收缩残差矩阵（更鲁棒）
+meth_mtx <- read.csv("mean_shrunken_residuals.csv", row.names=1) %>%
+  as.matrix()
+rownames(meth_mtx)<-gsub("_Testpaired_pe.deduplicated.sorted.bismark", "", rownames(meth_mtx))#去掉后缀
+meth_mtx<-t(meth_mtx)
+
+cell_groups<-read.csv("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-methscan\\cell_groups.csv",header = F)
+cell_groups$V1<-gsub("_Testpaired_pe.deduplicated.sorted.bismark", "", cell_groups$V1)#去掉后缀
+#按照分组排序
+cell_groups <- cell_groups[order(cell_groups$V2), ]
+
+
+index<-which(rownames(meth_mtx)%in%cell_groups$V1)
+
+meth_mtx<-meth_mtx[,cell_groups$V1]
+
+group<-cell_groups$V2
+# ==============================
+# 差异甲基化自动 Pipeline
+# 输入: meth_mtx (行=位点/区域, 列=细胞), group (向量, 长度等于列数)
+# 分组: group_A vs group_B
+# 方法: t-test, Wilcoxon, Fisher
+# 输出: 结果表 + 可选火山图
+# ==============================
+
+library(matrixStats)
+
+# ---------- 1. 基础检查 ----------
+stopifnot(length(group) == ncol(meth_mtx))
+stopifnot(all(group %in% c("group_A", "group_B")))
+
+# ---------- 2. 过滤 NA ----------
+keep <- rowMeans(!is.na(meth_mtx)) >= 0.3
+meth_mtx <- meth_mtx[keep, , drop = FALSE]
+message("过滤后保留 ", nrow(meth_mtx), " 个位点/区域")
+
+# ---------- 3. 定义三种检验 ----------
+run_tests <- function(x, g1, g2) {
+  # t-test
+  t_p <- tryCatch(t.test(x[g1], x[g2])$p.value, error = function(e) NA)
+  
+  # Wilcoxon
+  w_p <- tryCatch(wilcox.test(x[g1], x[g2])$p.value, error = function(e) NA)
+  
+  # Fisher (需要二值化)
+  bin_x <- ifelse(x > 0.5, 1, 0)  # 这里阈值可改
+  tbl <- table(bin_x, group = ifelse(!is.na(bin_x), group, NA))
+  f_p <- tryCatch(fisher.test(tbl)$p.value, error = function(e) NA)
+  
+  return(c(t_p, w_p, f_p))
+}
+
+# ---------- 4. 批量运行 ----------
+res <- t(apply(meth_mtx, 1, function(x) {
+  g1 <- !is.na(x) & group == "group_A"
+  g2 <- !is.na(x) & group == "group_B"
+  
+  if (sum(g1) >= 3 & sum(g2) >= 3) {
+    run_tests(x, g1, g2)
+  } else {
+    c(NA, NA, NA)
+  }
+}))
+
+colnames(res) <- c("pval_ttest", "pval_wilcox", "pval_fisher")
+
+# ---------- 5. 差异均值 ----------
+diff_means <- rowMeans(meth_mtx[, group == "group_A"], na.rm = TRUE) -
+  rowMeans(meth_mtx[, group == "group_B"], na.rm = TRUE)
+
+# ---------- 6. 整合结果 ----------
+final_res <- data.frame(
+  region = rownames(meth_mtx),
+  diff = diff_means,
+  res,
+  fdr_ttest = p.adjust(res[,1], method = "fdr"),
+  fdr_wilcox = p.adjust(res[,2], method = "fdr"),
+  fdr_fisher = p.adjust(res[,3], method = "fdr")
+)
+write.table(final_res, file = "D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-VMR\\final_res.bed", sep = "\t", quote = FALSE, row.names = FALSE, col.names = T)
+# ---------- 7. 筛选显著 ----------
+sig_res <- subset(final_res,
+                  (fdr_ttest < 0.05 & abs(diff) > 0.2) |
+                    (fdr_wilcox < 0.05 & abs(diff) > 0.2) |
+                    (fdr_fisher < 0.05 & abs(diff) > 0.2))
+
+message("显著差异区域数: ", nrow(sig_res))
+# ---------- 7. 分别筛选显著 
+sig_ttest <- subset(final_res, pval_ttest < 0.05 & abs(diff) > 0.2)
+sig_wilcox <- subset(final_res, pval_wilcox < 0.05 & abs(diff) > 0.2)
+sig_fisher <- subset(final_res, pval_fisher < 0.05 & abs(diff) > 0.2)
+
+message("显著差异区域数 (t-test): ", nrow(sig_ttest))
+message("显著差异区域数 (Wilcoxon): ", nrow(sig_wilcox))
+message("显著差异区域数 (Fisher): ", nrow(sig_fisher))
+index<-which(sig_ttest$region%in%sig_wilcox$region)
+
+
+
+# ---------- 统计上调 / 下调 ----------
+count_up_down <- function(df, method_name) {
+  up   <- sum(df$diff > 0, na.rm = TRUE)
+  down <- sum(df$diff < 0, na.rm = TRUE)
+  data.frame(
+    Method = method_name,
+    Up = up,
+    Down = down,
+    Total = nrow(df)
+  )
+}
+
+stats_summary <- rbind(
+  count_up_down(sig_ttest,  "t-test"),
+  count_up_down(sig_wilcox, "Wilcoxon"),
+  count_up_down(sig_fisher, "Fisher")
+)
+
+print(stats_summary)
+
+
+#卡P值就选Wilcoxon，卡fdr就选T检验的结果,在这里我选择了卡P值和Wilcoxon
+
+
+# ---------- 8. 可选火山图 ----------
+
+library(ggplot2)
+
+threshold <- -log10(0.05)
+
+ggplot(final_res, aes(x = diff, y = -log10(pval_wilcox))) +
+  geom_point(aes(color = ifelse(-log10(pval_wilcox) > threshold & diff < -0.2, 
+                                "显著低甲基化", 
+                                ifelse(-log10(pval_wilcox) > threshold & diff > 0.2, "显著高甲基化", "非显著"))), 
+             alpha = 0.6) +
+  geom_vline(xintercept = c(-0.2, 0.2), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = threshold, linetype = "dashed", color = "blue") +
+  theme_minimal() +
+  labs(x = "Methylation difference (group_A - group_B)",
+       y = "-log10(p-value, Wilcoxon)",
+       title = "Volcano plot (Wilcoxon test)") +
+  scale_color_manual(values = c("显著低甲基化" = "blue", "显著高甲基化" = "red", "非显著" = "grey")) +
+  theme(legend.title = element_blank())
+
+
+
+
+library(ggplot2)
+library(ggrepel)  # 需要先安装: install.packages("ggrepel")
+
+threshold <- -log10(0.05)
+
+# 创建一个新列来标识显著差异的点
+final_res$significance <- ifelse(-log10(final_res$pval_wilcox) > threshold & final_res$diff < -0.2,
+                                 "显著低甲基化",
+                                 ifelse(-log10(final_res$pval_wilcox) > threshold & final_res$diff > 0.2,
+                                        "显著高甲基化", "非显著"))
+
+# 创建火山图
+ggplot(final_res, aes(x = diff, y = -log10(pval_wilcox))) +
+  geom_point(aes(color = significance), alpha = 0.6) +
+  geom_vline(xintercept = c(-0.2, 0.2), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = threshold, linetype = "dashed", color = "blue") +
+  
+  # 添加标签 - 只为显著差异的点添加
+  geom_text_repel(
+    data = subset(final_res, significance != "非显著"),
+    aes(label = rownames(subset(final_res, significance != "非显著"))),
+    size = 3,
+    max.overlaps = 20,  # 控制最大重叠标签数
+    box.padding = 0.5,  # 标签周围的填充
+    segment.color = "grey50",  # 连接线的颜色
+    segment.size = 0.5  # 连接线的粗细
+  ) +
+  
+  theme_minimal() +
+  labs(x = "Methylation difference (group_A - group_B)",
+       y = "-log10(p-value, Wilcoxon)",
+       title = "Volcano plot (Wilcoxon test)") +
+  scale_color_manual(values = c("显著低甲基化" = "blue", "显著高甲基化" = "red", "非显著" = "grey")) +
+  theme(legend.title = element_blank())
+#拆分region-----------------------------------------------
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+# 假设 sig_wilcox 已存在且有 region 列
+# 1. 先把 region 按点或下划线或其他分隔符分割为 chr 和 rest（示例以"."或"."后数字为分割）
+parts <- strsplit(as.character(sig_wilcox$region), "\\.")  # 用点分割
+
+# parts 是列表，每个元素通常像 c("X9","106696068","106699968")
+# 提取为矩阵（若始终为3部分）
+mat <- do.call(rbind, parts)
+
+# 2. 构建 chr,start,end 列
+chr_raw <- mat[,1]
+start   <- as.integer(mat[,2])
+end     <- as.integer(mat[,3])
+
+# 3. 处理 chr_raw 到目标 chr 名称规则
+# 如果 chr_raw 以 "X" 或 "Y" 单独或开头且后面跟着点表示 X/Y：
+# - 当 chr_raw 完全等于 "X" / "Y" 或等于 "X"（也适配 "X" 前缀情形），保留为 "X"/"Y"
+# - 否则，如果含有数字（如 "X9"、"9"、"chr9" 等），提取数字并加 "chr" 前缀
+chr <- ifelse(grepl("^X$", chr_raw) | grepl("^X$", toupper(chr_raw)),
+              "X",
+              ifelse(grepl("^Y$", chr_raw) | grepl("^Y$", toupper(chr_raw)),
+                     "Y",
+                     # 否则提取数字部分
+                     paste0("chr", gsub("^[A-Za-z]*", "", chr_raw))))
+
+# 4. 把结果放回数据框
+sig_wilcox$chr   <- chr
+sig_wilcox$start <- start
+sig_wilcox$end   <- end
+
+sig_wilcox<-sig_wilcox[-which(sig_wilcox$chr=="X"|sig_wilcox$chr=="Y"),]
+
+up_wilcox<-sig_wilcox[which(sig_wilcox$diff > 0.2 & sig_wilcox$pval_ttest < 0.05),]
+down_wilcox<-sig_wilcox[which(sig_wilcox$diff < -0.2 & sig_wilcox$pval_ttest < 0.05),]
+
+up_wilcox<-up_wilcox[,c(9:11)]
+down_wilcox<-down_wilcox[,c(9:11)]
+
+
+#导入包--------------------
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(DOSE)
+library(GenomicRanges)
+library(GenomicFeatures)
+library(annotatr)
+library(fgsea)
+library(tidyverse)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene) # 根据你的基因组版本选择
+library(GenomicRanges)
+########################读取差异甲基化位点,查看这些位点分布在哪些基因组区域----------------------
+setwd("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-VMR")
+sig_wilcox<-read.table("sig_wilcox.bed",header = T)   #差异VMR
+up_wilcox<-read.table("up_wilcox.bed",header = T)       #差异高VMR
+down_wilcox<-read.table("down_wilcox.bed",header = T)    #差异低VMR
+
+table(sig_wilcox$chr)
+
+#拆分高低甲基化组
+dmr_hypo<-down_wilcox
+
+dmr_hyper<-up_wilcox
+
+
+#################准备DMR数据并转换为GenomicRanges对象
+
+# 假设你的数据已经加载为dmr_data
+# 确保列名正确
+
+# 转换为GenomicRanges对象
+dmr_hypo <- makeGRangesFromDataFrame(dmr_hypo, 
+                                     keep.extra.columns = TRUE,
+                                     ignore.strand = TRUE)
+
+dmr_hyper <- makeGRangesFromDataFrame(dmr_hyper, 
+                                      keep.extra.columns = TRUE,
+                                      ignore.strand = TRUE)
+
+# 查看对象
+dmr_hypo
+dmr_hyper
+
+
+########################注释DMR到最近的基因
+
+
+# 使用ChIPseeker进行注释
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene # 根据你的基因组版本选择
+promoter_region <- getPromoters(TxDb = txdb, upstream = 2000, downstream = 2000)
+hypo_promoter <- subsetByOverlaps(dmr_hypo, promoter_region)
+hyper_promoter <- subsetByOverlaps(dmr_hyper, promoter_region)
+#只注释启动子区域
+
+#-1500bp ~ +500bp  经典 promoter  文献常用，平衡覆盖性和特异性
+#-1000bp ~ +100bp  严格 promoter  准确找启动子甲基化抑制效应
+hypo_anno <- annotatePeak(hypo_promoter, 
+                          tssRegion = c(-2000, 2000),
+                          TxDb = txdb,
+                          annoDb = "org.Hs.eg.db")
+
+hyper_anno <- annotatePeak(hyper_promoter, 
+                           tssRegion = c(-2000, 2000),
+                           TxDb = txdb,
+                           annoDb = "org.Hs.eg.db")
+
+# 查看注释结果
+head(as.data.frame(hyper_anno))
+
+# 可视化注释结果
+plotAnnoPie(hypo_anno)
+plotAnnoBar(hypo_anno)
+
+
+######################功能富集分析
+##########################基因本体(GO)富集分析
+
+# 提取所有邻近基因
+hypo_genes <-  as.data.frame(unique(as.data.frame(hypo_anno)$SYMBOL))
+colnames(hypo_genes)<-"gene"
+
+
+hyper_genes <- as.data.frame(unique(as.data.frame(hyper_anno)$SYMBOL))
+colnames(hyper_genes)<-"gene"
+hyper_genes<-hyper_genes[-3,]
+
+
+# a<-intersect(hypo_genes$gene,hyper_genes$gene)
+# hypo_genes<-hypo_genes[-which(hypo_genes$gene%in%a),]
+# hyper_genes<-hyper_genes[-which(hyper_genes$gene%in%a),]
+#a<-intersect(hypo_genes,hyper_genes)
+
+

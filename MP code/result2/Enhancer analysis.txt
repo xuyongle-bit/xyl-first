@@ -1,0 +1,564 @@
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(stringr)
+})
+
+# ================== 0. 路径设置 ==================
+base_dir <- "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/增强子分析/"  # <<< 改成你自己放这三个文件的目录
+
+meta_fp <- file.path(base_dir, "Human.sample_name2library_id.txt")
+bed_fp  <- file.path(base_dir, "human_permissive_enhancers_phase_1_and_2.bed")
+tpm_fp  <- file.path(base_dir, "human_permissive_enhancers_phase_1_and_2_expression_tpm_matrix.txt")
+
+# ================== 1. 读入样本注释 ==================
+# 第一列 = 细胞类型/样本名，第二列 = CNhs编号，没有表头
+meta_raw <- fread(meta_fp, sep = "\t", header = FALSE)
+
+# 只用前两列：sample_name, library_id
+meta <- meta_raw[, 1:2]
+setnames(meta, c("sample_name", "library_id"))
+
+
+# 标记“前列腺相关样本”
+meta <- meta %>%
+  mutate(
+    sample_name_lower = tolower(sample_name),
+    is_prostate = str_detect(sample_name_lower, "prostate") |
+      str_detect(sample_name_lower, "lncap")   |
+      str_detect(sample_name_lower, "vcap")
+  )
+
+prostate_meta <- meta %>% filter(is_prostate)
+
+cat("前列腺相关样本数量: ", nrow(prostate_meta), "\n")
+print(prostate_meta)
+
+prostate_lib_ids <- prostate_meta$library_id
+
+# ================== 2. 读入增强子 TPM 矩阵 ==================
+# 第一列是 Id（形如 chr1:839741-840250），后面每一列是 CNhs 编号
+expr <- fread(tpm_fp, sep = "\t", header = TRUE)
+setnames(expr, 1, "coord_id")   # 把第一列 Id 改名成 coord_id，方便后面 join
+
+cat("TPM 矩阵维度: ", nrow(expr), " enhancers × ", ncol(expr) - 1, " samples\n")
+
+# 找出矩阵中真正存在、又是前列腺相关的列
+prostate_cols <- intersect(prostate_lib_ids, colnames(expr))
+cat("TPM 矩阵中匹配到的前列腺相关列数: ", length(prostate_cols), "\n")
+print(prostate_cols)
+
+if (length(prostate_cols) == 0) {
+  stop("在表达矩阵中没有找到任何前列腺相关的列，请检查 library_id 与列表名是否一致。")
+}
+
+# 只保留 coord_id + 前列腺列
+expr_prostate <- expr[, c("coord_id", prostate_cols), with = FALSE]
+
+# ================== 3. “拉长”成 enhancer × 样本 的长表 ==================
+expr_long <- melt(
+  expr_prostate,
+  id.vars      = "coord_id",
+  variable.name = "library_id",
+  value.name    = "tpm"
+)
+
+# 设置一个活性阈值（你可以按需要改，比如 0.5 / 1）
+tpm_cutoff <- 1
+
+expr_long_filt <- expr_long %>%
+  filter(tpm >= tpm_cutoff)
+
+cat("tpm ≥ ", tpm_cutoff, " 的 (enhancer × 前列腺样本) 数量: ", nrow(expr_long_filt), "\n")
+
+# ================== 4. 加上细胞类型（sample_name） ==================
+expr_long_annot <- expr_long_filt %>%
+  left_join(prostate_meta %>% select(library_id, sample_name),
+            by = "library_id")
+
+# ================== 5. 加上基因组坐标（来自 .bed） ==================
+bed <- fread(bed_fp, sep = "\t", header = FALSE)
+
+# 根据 FANTOM 的说明，前几列大致是：
+# 1: chr, 2: start, 3: end, 4: chr:start-end 这个 ID（与你表达矩阵里的 coord_id 一致）
+setnames(bed, 1:4, c("chr", "start", "end", "coord_id"))
+
+bed_small <- bed[, .(chr, start, end, coord_id)]
+
+expr_long_annot <- expr_long_annot %>%
+  left_join(bed_small, by = "coord_id")
+
+# 调整一下列顺序
+expr_long_annot <- expr_long_annot %>%
+  select(chr, start, end, coord_id,
+         sample_name, library_id, tpm)
+
+#增强子富集#########
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(GenomicRanges)
+  library(annotatr)
+  library(ggplot2)
+  library(DSS)
+  # 如需富集分析再开：
+  # library(clusterProfiler)
+  # library(org.Hs.eg.db)
+})
+
+
+# 输入文件路径
+dml_file <- "D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\差异-DSS\\DSS_result.rds"
+
+# Step 1: 读取并筛选
+dml <- readRDS(dml_file)
+rownames(dml)<-NULL  #改变行名为默认
+dmr <- callDMR(dml, delta=0.1, p.threshold=0.05)#识别差异甲基化区域
+head(dmr)
+rownames(dmr)<-NULL  #改变行名为默认
+
+# 查看 diff 的分布情况
+summary(dmr$diff)
+hist(dmr$diff, breaks = 100, col = "skyblue", main = "Histogram of diff")
+
+#提取高低甲基化区域
+
+# 使用0.2阈值分类（中间的不分类）
+dmr <- dmr %>%
+  mutate(meth_status = case_when(
+    diff.Methy >= 0.15 ~ "Hypermethylated",
+    diff.Methy <= -0.15 ~ "Hypomethylated",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(meth_status))
+
+
+
+# ================== 0. 路径与参数 ==================
+base_dir <- "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/增强子分析/0.5阈值/"
+
+enh_bed_fp  <- file.path(base_dir,
+                         "FANTOM_prostate_enhancers_unique.bed")
+enh_long_fp <- file.path(base_dir,
+                         "FANTOM_prostate_enhancers_with_TPM_and_celltype.tsv")
+
+out_dir <- "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/增强子分析/0.5阈值/"
+
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+# 你的基因组版本（annotatr 用）：自己按情况改成 "hg19" 或 "hg38"
+genome_ver <- "hg19"
+
+# ================== 1. 把 DMR 和增强子都转成 GRanges ==================
+# 给每个 DMR 一个 ID，方便后面 join
+dmr$dmr_id <- seq_len(nrow(dmr))
+
+dmr_gr <- makeGRangesFromDataFrame(
+  dmr,
+  seqnames.field = "chr",
+  start.field    = "start",
+  end.field      = "end",
+  keep.extra.columns = TRUE
+)
+
+# FANTOM 前列腺增强子 bed：假设格式为 chr, start, end, coord_id
+enh_bed <- fread(enh_bed_fp, header = FALSE)
+setnames(enh_bed, c("chr", "start", "end", "coord_id"))
+
+enh_gr <- makeGRangesFromDataFrame(
+  enh_bed,
+  seqnames.field = "chr",
+  start.field    = "start",
+  end.field      = "end",
+  keep.extra.columns = TRUE
+)
+
+# ================== 2. 找 DMR 与增强子的重叠（enhancer DMR） ==================
+hits <- findOverlaps(dmr_gr, enh_gr)
+
+cat("落在前列腺增强子上的 DMR 数量: ",
+    length(unique(queryHits(hits))), "\n")
+
+# 组合成一个数据框：一个 DMR × 一个增强子
+dmr_df  <- as.data.frame(dmr_gr)
+enh_df  <- as.data.frame(enh_gr)
+
+dmr_enh <- cbind(
+  dmr_df[queryHits(hits), ],
+  enh_df[subjectHits(hits), c("seqnames", "start", "end", "coord_id")]
+)
+colnames(dmr_enh)<-c("dmr_chr","dmr_start","dmr_end","width","strand","length","nCG","meanMethy1",
+                     "meanMethy2","diff.Methy","areaStat","meth_status","dmr_id","enh_chr","enh_start","enh_end","coord_id"   )
+
+
+# 保存一份原始 enhancer DMR 表
+fwrite(dmr_enh,
+       file = file.path(out_dir, "DMR_enhancers_交集.tsv"),
+       sep  = "\t")
+
+# 简单统计 Hypo/Hyper
+table_dmr_status <- dmr_enh %>%
+  distinct(dmr_id, meth_status) %>%
+  dplyr::count(meth_status, name = "n_DMR")
+
+print(table_dmr_status)
+
+# 小条形图
+p_status <- ggplot(table_dmr_status,
+                   aes(x = meth_status, y = n_DMR, fill = meth_status)) +
+  geom_col() +
+  theme_bw(base_size = 14) +
+  labs(x = "DMR methylation status",
+       y = "count",
+       title = "Enhancer DMR counts (Hypo vs Hyper)")
+p_status
+ggsave(file.path(out_dir, "高低甲基化_增强子_条形图.pdf"),
+       p_status, width = 5, height = 4)
+
+# ================== 3. 给 enhancer DMR 注释靶基因（最近基因） ==================
+# 只对 DMR 维度去重
+enh_dmr_unique_gr <- dmr_gr[unique(queryHits(hits))]
+
+annotations <- build_annotations(
+  genome      = genome_ver,
+  annotations = paste0(genome_ver, "_basicgenes")
+)
+
+enh_dmr_annot <- annotate_regions(
+  regions       = enh_dmr_unique_gr,
+  annotations   = annotations,
+  ignore.strand = TRUE,
+  quiet         = TRUE
+)
+
+enh_dmr_annot_df <- as.data.frame(enh_dmr_annot)
+
+# 看看 annotatr 给的列名（symbol / gene_id 等）
+# print(colnames(enh_dmr_annot_df))
+
+# 这里假设有一列 symbol 作为基因名，如果叫 gene_name / SYMBOL 就改一下
+enh_dmr_annot_df <- enh_dmr_annot_df %>%
+  dplyr::rename(gene_symbol = annot.symbol)
+
+
+enh_dmr_annot_df <- enh_dmr_annot_df %>%
+  dplyr::select(
+    dmr_id,
+    seqnames, start, end,
+    diff.Methy, meth_status,
+    gene_symbol,
+    annot.gene_id, annot.type
+  )
+
+# 保存完整注释表
+data.table::fwrite(
+  enh_dmr_annot_df,
+  file = file.path(out_dir, "差异增强子_基因注释.tsv"),
+  sep  = "\t"
+)
+
+# ================== 4. 得到“增强子 Hypo/Hyper 甲基化的基因集” ==================
+enhancer_gene_lists <- enh_dmr_annot_df %>%
+  dplyr::filter(!is.na(gene_symbol)) %>%   # 去掉没有基因名的
+  dplyr::select(gene_symbol, meth_status) %>%
+  dplyr::distinct()
+
+enh_hyper_genes <- enhancer_gene_lists %>%
+  dplyr::filter(meth_status == "Hypermethylated") %>%
+  dplyr::pull(gene_symbol) %>% unique()
+
+enh_hypo_genes <- enhancer_gene_lists %>%
+  dplyr::filter(meth_status == "Hypomethylated") %>%
+  dplyr::pull(gene_symbol) %>% unique()
+
+length(enh_hyper_genes)
+length(enh_hypo_genes)
+
+write.table(
+  enh_hyper_genes,
+  file = file.path(out_dir, "高_增强子_基因.txt"),
+  quote = FALSE, row.names = FALSE, col.names = FALSE
+)
+write.table(
+  enh_hypo_genes,
+  file = file.path(out_dir, "低_增强子_基因.txt"),
+  quote = FALSE, row.names = FALSE, col.names = FALSE
+)
+
+# ================== 5. 结合 FANTOM 细胞类型信息 ==================
+# 如果你想知道这些 enhancer DMR 对应的增强子，
+# 在哪些前列腺细胞类型（PC-3 / DU145 / Stromal 等）里活性较高：
+
+# 读 FANTOM 长表
+enh_long <- fread(enh_long_fp, sep = "\t")
+enh_long <- as.data.frame(enh_long)   # 关键：转成 data.frame，避免 S4 冲突
+
+# 这里显式用 dplyr::select
+enh_long_small <- enh_long %>%
+  dplyr::select(coord_id, sample_name, library_id, tpm)
+
+# 把 DMR×增强子表与 FANTOM 细胞类型信息合并
+dmr_enh_long <- dmr_enh %>%
+  left_join(enh_long_small, by = "coord_id")
+
+fwrite(dmr_enh_long,
+       file = file.path(out_dir,
+                        "细胞类型_差异增强子.tsv"),
+       sep = "\t")
+
+# 比如：看 Hypo enhancer DMR 偏向哪些细胞类型
+dmr_enh_long %>%
+  filter(meth_status == "Hypomethylated") %>%
+  group_by(sample_name) %>%
+  summarise(n_enh = n_distinct(coord_id)) %>%
+  arrange(desc(n_enh)) %>%
+  fwrite(file.path(out_dir, "Hypo_enhancer_DMR_count_per_celltype.tsv"),
+         sep = "\t")
+
+
+#增强子与启动子差异###
+# ==================== 环境与依赖 ====================
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+  library(ggpubr)
+  library(GenomicRanges)
+  library(IRanges)
+})
+
+# ---------------------------
+# 如缺 Bioconductor 包，自动安装（只需跑一次）
+# ---------------------------
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+bioc_pkgs <- c("TxDb.Hsapiens.UCSC.hg19.knownGene", "org.Hs.eg.db", "AnnotationDbi")
+for (p in bioc_pkgs) {
+  if (!requireNamespace(p, quietly = TRUE)) BiocManager::install(p, ask = FALSE, update = FALSE)
+}
+suppressPackageStartupMessages({
+  library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+  library(org.Hs.eg.db)
+  library(AnnotationDbi)
+})
+
+# ==================== 路径与参数（按你提供的） ====================
+cov_MP_dir     <- "/data2/home/xuyl/xyl/methscan/tumor/CTC_tumor"        # MP 癌细胞
+cov_nonMP_dir  <- "/data2/home/xuyl/xyl/methscan/tumor/non_CTC_tumor"   # 非MP 癌细胞
+anno_dir       <- "/data2/home/xuyl/xyl/methscan/feature_annotion"
+
+# 你已经把这个文件改成了 4 列：chr start end gene（且只含5基因）
+enhancer_bed_path <- file.path(anno_dir, "FANTOM_prostate_enhancers_unique.bed")
+
+# 目标基因
+target_genes <- c("WNT7B", "KLF16", "PRPSAP1", "SBNO2", "MLLT1")
+valid_chroms  <- paste0("chr", 1:22)
+
+# promoter 定义（可调）
+promoter_upstream   <- 2000L
+promoter_downstream <- 500L
+
+# 输出目录
+out_dir <- file.path(getwd(), "MP_promoter_vs_enhancer_5genes")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ==================== 工具：构建 cov 文件表 ====================
+get_cell_id <- function(path) tools::file_path_sans_ext(basename(path))
+get_file_table <- function(dir, group_label) {
+  files <- list.files(dir, pattern = "\\.cov$", full.names = TRUE)
+  if (length(files) == 0) return(NULL)
+  data.frame(file = files, cell = get_cell_id(files), group = group_label)
+}
+
+MP_files     <- get_file_table(cov_MP_dir, "MP")
+nonMP_files  <- get_file_table(cov_nonMP_dir, "nonMP")
+all_files <- rbindlist(list(MP_files, nonMP_files), fill = TRUE)
+if (nrow(all_files) == 0) stop("在 cov_MP_dir / cov_nonMP_dir 没找到 .cov 文件，请检查路径。")
+
+# ==================== 1) 读取你定好的 enhancer bed（含gene列） ====================
+enh <- fread(enhancer_bed_path, header = FALSE)
+if (ncol(enh) < 4) stop("enhancer bed 必须至少4列：chr start end gene。")
+
+setnames(enh, 1:4, c("chr","start","end","gene"))
+enh <- enh[chr %in% valid_chroms]
+enh <- enh[gene %in% target_genes]
+
+if (nrow(enh) == 0) {
+  stop("enhancer bed 过滤后为空：请确认 gene 列确实是 WNT7B/KLF16/PRPSAP1/SBNO2/MLLT1 且 chr 为 chr1-22。")
+}
+
+# 去重、排序（可选）
+enh <- unique(enh[, .(chr, start, end, gene)])
+setkey(enh, chr, start, end)
+
+fwrite(enh, file.path(out_dir, "5genes_enhancer_input_checked.bed"), sep = "\t")
+
+# ==================== 2) 用 hg19 TxDb 生成 5 基因 promoter 区域（带gene列） ====================
+# SYMBOL -> ENTREZ
+eg <- AnnotationDbi::select(org.Hs.eg.db,
+                            keys = target_genes,
+                            keytype = "SYMBOL",
+                            columns = c("ENTREZID","SYMBOL"))
+eg <- eg[!is.na(eg$ENTREZID), ]
+if (nrow(eg) == 0) stop("无法将 SYMBOL 映射到 ENTREZID，请检查基因名是否标准。")
+
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+tx_by_gene <- transcriptsBy(txdb, by = "gene")
+
+get_gene_tss <- function(entrez_id) {
+  txs <- tx_by_gene[[as.character(entrez_id)]]
+  if (is.null(txs) || length(txs) == 0) return(NULL)
+  st <- as.character(unique(strand(txs)))[1]
+  if (st == "+") {
+    tss_pos <- min(start(txs))
+  } else if (st == "-") {
+    tss_pos <- max(end(txs))
+  } else {
+    tss_pos <- min(start(txs))
+    st <- "*"
+  }
+  chr <- as.character(seqnames(txs)[1])
+  GRanges(seqnames = chr, ranges = IRanges(start = tss_pos, end = tss_pos), strand = st)
+}
+
+tss_list <- lapply(eg$ENTREZID, get_gene_tss)
+keep <- !vapply(tss_list, is.null, logical(1))
+eg <- eg[keep, ]
+tss_gr <- do.call(c, tss_list[keep])
+mcols(tss_gr)$gene <- eg$SYMBOL
+tss_gr <- tss_gr[as.character(seqnames(tss_gr)) %in% valid_chroms]
+if (length(tss_gr) == 0) stop("5个基因的 TSS 不在 chr1-22 或无法获取（hg19）。")
+
+prom_gr <- promoters(tss_gr, upstream = promoter_upstream, downstream = promoter_downstream)
+
+prom <- data.table(
+  chr = as.character(seqnames(prom_gr)),
+  start = start(prom_gr) - 1L,  # 转成0-based start，匹配你的 dt start=pos-1
+  end = end(prom_gr),
+  gene = mcols(prom_gr)$gene
+)
+prom <- prom[chr %in% valid_chroms]
+prom <- prom[gene %in% target_genes]
+prom <- unique(prom[, .(chr, start, end, gene)])
+
+setkey(prom, chr, start, end)
+fwrite(prom, file.path(out_dir, "5genes_promoter_from_TxDb_hg19.bed"), sep = "\t")
+
+# ==================== 3) 计算：每cell每gene每feature 的甲基化（sum X / sum N） ====================
+calc_gene_meth <- function(all_files, region_dt, feature_label, valid_chroms) {
+  res_list <- list()
+  
+  for (i in 1:nrow(all_files)) {
+    row <- all_files[i, ]
+    
+    dt <- fread(row$file, col.names = c("chr", "pos", "N", "X"))
+    dt <- dt[chr %in% valid_chroms & N > 0]
+    
+    # CpG位点转为 [pos-1, pos)
+    dt[, start := pos - 1L]
+    dt[, end := pos]
+    setkey(dt, chr, start, end)
+    
+    olap <- foverlaps(dt, region_dt, nomatch = 0L)
+    if (nrow(olap) == 0) next
+    
+    # 同一 gene 若有多个区域（enhancer可能多个），做加权汇总
+    agg <- olap[, .(Xsum = sum(X, na.rm = TRUE),
+                    Nsum = sum(N, na.rm = TRUE)),
+                by = .(gene)]
+    agg[, methylation := Xsum / Nsum]
+    agg[, `:=`(cell = row$cell, group = row$group, feature = feature_label)]
+    
+    res_list[[length(res_list) + 1]] <- agg[, .(cell, group, gene, feature, methylation, Xsum, Nsum)]
+    rm(dt, olap, agg); gc()
+  }
+  
+  if (length(res_list) == 0) stop(paste0("feature=", feature_label, " 全部样本 overlap=0，请检查坐标体系(hg19)与chr前缀。"))
+  rbindlist(res_list, fill = TRUE)
+}
+
+promoter_df <- calc_gene_meth(all_files, prom, "promoter", valid_chroms)
+enhancer_df <- calc_gene_meth(all_files, enh,  "enhancer", valid_chroms)
+
+gene_region_df <- rbindlist(list(promoter_df, enhancer_df), fill = TRUE)
+gene_region_df[, feature := factor(feature, levels = c("promoter","enhancer"))]
+gene_region_df[, group := factor(group, levels = c("nonMP","MP"))]
+gene_region_df <- gene_region_df[gene %in% target_genes]
+
+# 保存 per-cell 明细
+fwrite(gene_region_df, file.path(out_dir, "5genes_promoter_enhancer_methylation_per_cell.tsv"), sep = "\t")
+
+# ==================== 4) Panel A：paired Δ（MP - nonMP） ====================
+delta_df <- gene_region_df[, .(mean_meth = mean(methylation, na.rm = TRUE)),
+                           by = .(gene, feature, group)]
+delta_wide <- dcast(delta_df, gene + feature ~ group, value.var = "mean_meth")
+delta_wide[, delta := MP - nonMP]
+delta_wide[, feature := factor(feature, levels = c("promoter","enhancer"))]
+
+p_panelA <- ggplot(delta_wide, aes(x = feature, y = delta, group = gene)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 3) +
+  geom_text(
+    data = delta_wide[feature == "enhancer"],
+    aes(label = gene),
+    hjust = -0.15,      # 向右偏一点
+    size = 3
+  ) +
+  labs(
+    title = "Promoter vs Enhancer methylation difference (MP - nonMP)",
+    x = NULL, y = expression(Delta*" methylation (MP - nonMP)")
+  ) +
+  theme_classic(base_size = 12) +
+  coord_cartesian(clip = "off")  # 防止文字被裁剪
+
+
+
+p_panelA
+ggsave(file.path(out_dir, "PanelA_paired_delta_promoter_vs_enhancer.pdf"), p_panelA, width = 6.5, height = 4.2)
+
+
+# 可选：再输出 |Δ| 版本（避免“方向抵消”导致视觉误读）
+delta_abs <- copy(delta_wide)
+delta_abs[, delta_abs := abs(delta)]
+
+p_panelA_abs <- ggplot(delta_abs, aes(x = feature, y = delta_abs, group = gene)) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 3) +
+  labs(
+    title = "Promoter vs Enhancer |methylation difference| (MP vs nonMP)",
+    x = NULL, y = expression("|"*Delta*" methylation|")
+  ) +
+  theme_classic(base_size = 12)
+p_panelA_abs
+ggsave(file.path(out_dir, "PanelA_paired_absdelta_promoter_vs_enhancer.pdf"), p_panelA_abs, width = 6.5, height = 4.2)
+
+# ==================== 5) 分布图：每gene×feature 的 MP vs nonMP ====================
+p_dist <- ggplot(gene_region_df, aes(x = group, y = methylation)) +
+  geom_violin(trim = TRUE, scale = "width") +
+  geom_boxplot(width = 0.18, outlier.size = 0.6) +
+  facet_grid(gene ~ feature, scales = "free_y") +
+  labs(
+    title = "Methylation distribution (5 genes): promoter vs enhancer",
+    x = NULL, y = "Methylation level (sum X / sum N)"
+  ) +
+  theme_classic(base_size = 11)
+p_dist
+ggsave(file.path(out_dir, "Distribution_MP_vs_nonMP_by_gene_promoter_enhancer.pdf"), p_dist, width = 9.5, height = 7.2)
+
+# ==================== 6) 统计表：每gene×feature 的 MP vs nonMP Wilcoxon ====================
+stat_df <- gene_region_df[, .(
+  p_value = tryCatch(wilcox.test(methylation ~ group)$p.value, error = function(e) NA_real_),
+  MP_mean = mean(methylation[group == "MP"], na.rm = TRUE),
+  nonMP_mean = mean(methylation[group == "nonMP"], na.rm = TRUE),
+  delta = mean(methylation[group == "MP"], na.rm = TRUE) - mean(methylation[group == "nonMP"], na.rm = TRUE),
+  n_MP = sum(group == "MP" & !is.na(methylation)),
+  n_nonMP = sum(group == "nonMP" & !is.na(methylation))
+), by = .(gene, feature)]
+
+fwrite(stat_df, file.path(out_dir, "MP_vs_nonMP_stats_by_gene_feature.tsv"), sep = "\t")
+
+cat("Done.\nOutputs saved to: ", out_dir, "\n")
+cat("Enhancer bed used: ", enhancer_bed_path, "\n")
+cat("Promoter definition: TSS upstream=", promoter_upstream, ", downstream=", promoter_downstream, " (hg19 TxDb)\n")
+
+

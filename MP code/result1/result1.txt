@@ -1,0 +1,1327 @@
+
+#https://anders-biostat.github.io/MethSCAn/tutorial.html  教程网站
+############################---------------------MethSCAn流程-------------------
+###########################-------python代码
+
+# # 检查Python版本（需要Python 3.6或更高版本）
+# python3 --version
+# 
+# # 安装MethSCAn
+# pip install methscan
+
+# #解压
+# tar -xvzf scbs_tutorial_data.tar.gz
+# cd scbs_tutorial_data
+
+
+
+##############################导入数据-----------------------
+#需要输入的数据类型
+# 1       100021800       100021800       100.000000      1       0
+# 1       100023064       100023064       0.000000        0       1
+# 1       100026855       100026855       100.000000      1       0
+# 1       100027218       100027218       100.000000      2       0
+# 1       100051671       100051671       0.000000        0       2
+
+#导入数据
+#methscan prepare *.cov compact_data
+
+
+###########################------R语言代码
+
+#compact_data文件中cell_stats.csv文件提取出来使用R语言需要质控的阈值
+
+
+library(tidyverse)
+setwd("D:\\CTC甲基化谱\\methscan\\用来质控的表格\\")
+CTC <-read.csv("CTC.csv")
+normal <-read.csv("normal.csv")
+tumor <-read.csv("tumor.csv")
+all <-read.csv("all.csv")#从一开始就合并三组数据
+# 散点图（全局甲基化比例 vs. 覆盖位点数）
+ggplot(all, aes(x = global_meth_frac * 100, y = n_obs)) +
+  geom_point(alpha = 0.6) +
+  geom_vline(xintercept = c(20, 90), color = "red", linetype = "dashed") +
+  labs(x = "Global Methylation %", y = "Observed CpG Sites")
+
+
+##########################-------下面是python代码
+#methscan filter --min-sites 60000 --min-meth 20 --max-meth 90 compact_data filtered_data #python代码 
+#过滤细胞，根据R中图确定阈值
+
+###########################获得甲基化矩阵--------------------
+
+#methscan smooth filtered_data   #平滑处理，VMR 检测所必需的，也后是获取甲基化矩阵所必需的
+
+#如果想求启动子等区域的矩阵，无需求VMR，但需要准备好改区域的注释信息
+#methscan matrix --threads 4 /bioccNSW/xyl/CTC/methscan/promoter/promoter_processed.bed filtered_data promoter_matrix
+
+# 使用4个CPU线程运行（根据实际硬件调整线程数），求VMR区域
+#methscan scan --threads 4 filtered_data VMRs.bed #进行 VMR 检测
+
+#VMRs.bed：BED格式文件，包含可变甲基化区域的基因组坐标和变异值
+# 1	180751	182751	0.09021088299943253	124	10
+# 1	589751	592251	0.09883732650100839	31	7
+# 1	603651	607051	0.0774588811657934	62	16
+# 1	609251	611351	0.09442826021169602	68	12
+# 1	630651	632951	0.08982094008973318	122	37
+# 1	857451	859551	0.08985658912198431	25	6
+# 1	865351	868951	0.07965125815017159	104	21
+
+#量化 VMR 的平均甲基化
+#methscan matrix --threads 4 VMRs.bed filtered_data VMR_matrix
+
+#VMR_matrix文件夹中methylation_fractions.csv.gz文件，文件中列出了所有细胞中所有区域（此处为：VMR）的平均甲基化
+
+#mean_shrunken_residuals.csv.gz这个文件生成经收缩残差校正的甲基化矩阵，可用于区分样品中的不同细胞类型、执行 PCA 和/或 UMAP 或进行聚类
+
+
+######################下游矩阵分析，此处使用R语言代码
+#降维策略，可以解决数据缺失值问题：在第一次迭代中，我们将居中输入矩阵中的每个缺失值替换为零，然后运行 PCA。然后，这些零将替换为 PCA 预测的值，并重新运行 PCA
+
+library(tidyverse)
+library(irlba)
+setwd("D:\\CTC甲基化谱\\methscan\\下游分析矩阵")
+
+## 读取收缩残差矩阵（更鲁棒）
+meth_mtx <- read.csv("all_mean_shrunken_residuals.csv", row.names=1) %>%
+  as.matrix()
+dim(combined_seurat)
+meth<-combined_seurat@assays$RNA$counts
+dim(meth)
+meth_mtx<-meth
+meth_mtx<-t(meth_mtx)
+meth_mtx[1:4,1:4]
+
+# 迭代输入缺失值的PCA，使用PCA补缺数据的函数
+prcomp_iterative <- function(x, n=10, n_iter=50, min_gain=0.001, ...) {
+  mse <- rep(NA, n_iter)
+  na_loc <- is.na(x)
+  x[na_loc] = 0  # zero is our first guess
+  
+  for (i in 1:n_iter) {
+    prev_imp <- x[na_loc]  # what we imputed in the previous round
+    # PCA on the imputed matrix
+    pr <- prcomp_irlba(x, center = F, scale. = F, n = n, ...)
+    # impute missing values with PCA
+    new_imp <- (pr$x %*% t(pr$rotation))[na_loc]
+    x[na_loc] <- new_imp
+    # compare our new imputed values to the ones from the previous round
+    mse[i] = mean((prev_imp - new_imp) ^ 2)
+    # if the values didn't change a lot, terminate the iteration
+    gain <- mse[i] / max(mse, na.rm = T)
+    if (gain < min_gain) {
+      message(paste(c("\n\nTerminated after ", i, " iterations.")))
+      break
+    }
+  }
+  pr$mse_iter <- mse[1:i]
+  pr
+}
+
+#在居中的甲基化矩阵上运行我们修饰的 PCA
+
+pca <- meth_mtx %>%
+  scale(center = T, scale = F) %>%
+  prcomp_iterative(n = 15)  # increase this value to e.g. 15 for real data sets
+
+pca_tbl <- as_tibble(pca$x) %>% 
+  add_column(cell=rownames(meth_mtx))
+#绘制 PCA
+pca_tbl %>% 
+  ggplot(aes(x = PC1, y = PC2)) +
+  geom_point() +
+  coord_fixed() +
+  labs(title="PCA based on VMR methylation")
+
+#UMAP
+
+library(uwot)  # R package for UMAP
+
+umap_obj <- uwot::umap(pca$x, min_dist=0.05, n_neighbors=5, seed=2, ret_nn=T)
+umap_tbl <- umap_obj$embedding %>%
+  magrittr::set_colnames(c("UMAP1", "UMAP2")) %>% 
+  as_tibble() %>% 
+  add_column(cell=rownames(meth_mtx))
+
+umap_tbl %>% 
+  ggplot(aes(x = UMAP1, y = UMAP2)) +
+  geom_point() +
+  coord_fixed() +
+  labs(title="UMAP based on VMR methylation")
+
+#细胞聚类
+library(igraph)  # R package for graph manipulation, also implements the Leiden algorithm
+setwd("D:\\CTC甲基化谱\\课题数据\\")
+info<-read.table("info.txt", header = TRUE, stringsAsFactors = FALSE)
+
+colnames(info)[1] <- "cell"
+
+
+# get the edges of the neighbor graph from the UMAP object
+neighbor_graph_edges <- 
+  tibble(from = rep(1:nrow(umap_obj$nn$euclidean$idx), times=ncol(umap_obj$nn$euclidean$idx)),
+         to = as.vector(umap_obj$nn$euclidean$idx),
+         weight = as.vector(umap_obj$nn$euclidean$dist)) %>%
+  filter(from != to) %>%
+  mutate(from = rownames(meth_mtx)[from],
+         to = rownames(meth_mtx)[to])
+
+# run Leiden clustering
+clust_obj <- neighbor_graph_edges %>%
+  igraph::graph_from_data_frame(directed=F) %>% 
+  igraph::cluster_leiden(resolution_parameter = .1)  # adjust the resolution parameter to your needs
+
+# put the clustering results into a data frame (tibble) for plotting
+clust_tbl <- tibble(
+  leiden_cluster = as.character(clust_obj$membership),
+  cell = clust_obj$names
+) %>% 
+  full_join(umap_tbl, by="cell")
+
+#按照簇上色
+clust_tbl %>% 
+  ggplot(aes(x = UMAP1, y = UMAP2, color = leiden_cluster)) +
+  geom_point() +
+  coord_fixed()
+
+
+#按照细胞类型上色
+umap_tbl <- left_join(umap_tbl, info, by = "cell")
+
+umap_tbl %>% 
+  ggplot(aes(x = UMAP1, y = UMAP2, color = cell_type)) +
+  geom_point() +
+  coord_fixed() +
+  theme_minimal()
+
+#promoter######################
+
+library(tidyverse)
+library(irlba)
+#setwd("D:\\CTC甲基化谱\\methscan\\下游分析矩阵\\启动子\\")
+setwd("/data2/home/xuyl/xyl/methscan")
+## 读取收缩残差矩阵（更鲁棒）
+meth_mtx <- read.csv("promoter.csv", row.names=1) %>%
+  as.matrix()
+
+rownames(meth_mtx)<-gsub("_Testpaired_pe.deduplicated.sorted.bismark", "", rownames(meth_mtx))#去掉后缀
+# dim(combined_seurat)
+# meth<-combined_seurat@assays$RNA$counts
+dim(meth_mtx)
+#meth_mtx<-t(meth_mtx)
+meth_mtx[1:4,1:4]
+set.seed(1234)
+# 迭代输入缺失值的PCA，使用PCA补缺数据的函数
+prcomp_iterative <- function(x, n=10, n_iter=50, min_gain=0.001, ...) {
+  mse <- rep(NA, n_iter)
+  na_loc <- is.na(x)
+  x[na_loc] = 0  # zero is our first guess
+  
+  for (i in 1:n_iter) {
+    prev_imp <- x[na_loc]  # what we imputed in the previous round
+    # PCA on the imputed matrix
+    pr <- prcomp_irlba(x, center = F, scale. = F, n = n, ...)
+    # impute missing values with PCA
+    new_imp <- (pr$x %*% t(pr$rotation))[na_loc]
+    x[na_loc] <- new_imp
+    # compare our new imputed values to the ones from the previous round
+    mse[i] = mean((prev_imp - new_imp) ^ 2)
+    # if the values didn't change a lot, terminate the iteration
+    gain <- mse[i] / max(mse, na.rm = T)
+    if (gain < min_gain) {
+      message(paste(c("\n\nTerminated after ", i, " iterations.")))
+      break
+    }
+  }
+  pr$mse_iter <- mse[1:i]
+  pr
+}
+
+#在居中的甲基化矩阵上运行我们修饰的 PCA
+
+#rm(clust_obj)
+
+
+pca <- meth_mtx %>%
+  scale(center = T, scale = F) %>%
+  prcomp_iterative(n = 30)  # increase this value to e.g. 15 for real data sets
+
+pca_tbl <- as_tibble(pca$x) %>% 
+  add_column(cell=rownames(meth_mtx))
+#绘制 PCA
+pca_tbl %>% 
+  ggplot(aes(x = PC1, y = PC2)) +
+  geom_point() +
+  coord_fixed() +
+  labs(title="PCA based on VMR methylation")
+
+#UMAP
+
+library(uwot)  # R package for UMAP
+library(ggplot2)
+umap_obj <- uwot::umap(pca$x, min_dist=0.05, n_neighbors=5, seed=2, ret_nn=T)
+umap_tbl <- umap_obj$embedding %>%
+  magrittr::set_colnames(c("UMAP1", "UMAP2")) %>% 
+  as_tibble() %>% 
+  add_column(cell=rownames(meth_mtx))
+
+#输出pdf
+pdf("umap_plot.pdf",width=8,height =6)
+ggplot(umap_tbl,aes(x=UMAP1,y=UMAP2))+
+  geom_point()+
+  coord_fixed()+
+  labs(title="UMAP based on VMR methylation")
+dev.off()
+
+
+#输出png
+# p<-umap_tbl %>% 
+#   ggplot(aes(x = UMAP1, y = UMAP2)) +
+#   geom_point() +
+#   coord_fixed() +
+#   labs(title="UMAP based on VMR methylation")
+# ggsave("umap_plot.png",plot=p,width=8,height =6,dpi = 300)
+
+#细胞聚类
+library(igraph)  # R package for graph manipulation, also implements the Leiden algorithm
+
+info<-read.table("info.txt", header = TRUE, stringsAsFactors = FALSE)
+
+colnames(info)[1] <- "cell"
+info<-info[which(info$cell%in%rownames(meth_mtx)),]
+
+
+#rm(clust_tbl)
+# get the edges of the neighbor graph from the UMAP object
+neighbor_graph_edges <- 
+  tibble(from = rep(1:nrow(umap_obj$nn$euclidean$idx), times=ncol(umap_obj$nn$euclidean$idx)),
+         to = as.vector(umap_obj$nn$euclidean$idx),
+         weight = as.vector(umap_obj$nn$euclidean$dist)) %>%
+  filter(from != to) %>%
+  mutate(from = rownames(meth_mtx)[from],
+         to = rownames(meth_mtx)[to])
+
+# run Leiden clustering
+clust_obj <- neighbor_graph_edges %>%
+  igraph::graph_from_data_frame(directed=F) %>% 
+  igraph::cluster_leiden(resolution_parameter = .9)  # adjust the resolution parameter to your needs
+
+# put the clustering results into a data frame (tibble) for plotting
+clust_tbl <- tibble(
+  leiden_cluster = as.character(clust_obj$membership),
+  cell = clust_obj$names
+) %>% 
+  full_join(umap_tbl, by="cell")
+
+
+#按照簇上色
+pdf("cluster.pdf",width=8,height =6)
+  ggplot(clust_tbl,aes(x = UMAP1, y = UMAP2, color = leiden_cluster)) +
+  geom_point() +
+  coord_fixed()
+dev.off()
+
+#按照细胞类型上色
+umap_tbl <- left_join(umap_tbl, info, by = "cell")
+
+
+
+
+#输出pdf
+pdf("celltype.pdf",width=8,height =6)
+ggplot(umap_tbl,aes(x=UMAP1,y=UMAP2, color = cell_type))+
+  geom_point()+
+  coord_fixed()+
+  theme_minimal()
+dev.off()
+
+
+
+############查看每个簇中细胞数量
+#rm(pca_tbl)
+cluster_cell_p<-merge(umap_tbl,clust_tbl,by="cell")
+
+#细胞类型数量
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==1),])
+table(aa[,5])
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==2),])
+table(aa[,5])
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==3),])
+table(aa[,5])
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==4),])
+table(aa[,5])
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==5),])
+table(aa[,5])
+
+
+
+#VMR###########################
+
+
+library(tidyverse)
+library(irlba)
+setwd("D:\\CTC甲基化谱\\methscan\\只用癌症和CTC\\VMR_matrix\\")
+#setwd("D:\\CTC甲基化谱\\methscan\\只用癌症和CTC\\promoter_matrix\\")
+## 读取收缩残差矩阵（更鲁棒）
+meth_mtx <- read.csv("mean_shrunken_residuals.csv", row.names=1) %>%
+  as.matrix()
+
+rownames(meth_mtx)<-gsub("_Testpaired_pe.deduplicated.sorted.bismark", "", rownames(meth_mtx))#去掉后缀
+# dim(combined_seurat)
+# meth<-combined_seurat@assays$RNA$counts
+dim(meth_mtx)
+#meth_mtx<-t(meth_mtx)
+meth_mtx[1:4,1:4]
+set.seed(1234)
+# 迭代输入缺失值的PCA，使用PCA补缺数据的函数
+prcomp_iterative <- function(x, n=10, n_iter=50, min_gain=0.001, ...) {
+  mse <- rep(NA, n_iter)
+  na_loc <- is.na(x)
+  x[na_loc] = 0  # zero is our first guess
+  
+  for (i in 1:n_iter) {
+    prev_imp <- x[na_loc]  # what we imputed in the previous round
+    # PCA on the imputed matrix
+    pr <- prcomp_irlba(x, center = F, scale. = F, n = n, ...)
+    # impute missing values with PCA
+    new_imp <- (pr$x %*% t(pr$rotation))[na_loc]
+    x[na_loc] <- new_imp
+    # compare our new imputed values to the ones from the previous round
+    mse[i] = mean((prev_imp - new_imp) ^ 2)
+    # if the values didn't change a lot, terminate the iteration
+    gain <- mse[i] / max(mse, na.rm = T)
+    if (gain < min_gain) {
+      message(paste(c("\n\nTerminated after ", i, " iterations.")))
+      break
+    }
+  }
+  pr$mse_iter <- mse[1:i]
+  pr
+}
+
+#在居中的甲基化矩阵上运行我们修饰的 PCA
+
+pca <- meth_mtx %>%
+  scale(center = T, scale = F) %>%
+  prcomp_iterative(n = 30)  # increase this value to e.g. 15 for real data sets
+
+pca_tbl <- as_tibble(pca$x) %>% 
+  add_column(cell=rownames(meth_mtx))
+#绘制 PCA
+pca_tbl %>% 
+  ggplot(aes(x = PC1, y = PC2)) +
+  geom_point() +
+  coord_fixed() +
+  labs(title="PCA based on VMR methylation")
+
+#UMAP
+
+library(uwot)  # R package for UMAP
+
+umap_obj <- uwot::umap(pca$x, min_dist=0.05, n_neighbors=5, seed=2, ret_nn=T)
+umap_tbl <- umap_obj$embedding %>%
+  magrittr::set_colnames(c("UMAP1", "UMAP2")) %>% 
+  as_tibble() %>% 
+  add_column(cell=rownames(meth_mtx))
+
+umap_tbl %>% 
+  ggplot(aes(x = UMAP1, y = UMAP2)) +
+  geom_point() +
+  coord_fixed() +
+  labs(title="UMAP based on VMR methylation")
+
+#细胞聚类
+library(igraph)  # R package for graph manipulation, also implements the Leiden algorithm
+setwd("D:\\CTC甲基化谱\\课题数据\\")
+info<-read.table("info.txt", header = TRUE, stringsAsFactors = FALSE)
+
+colnames(info)[1] <- "cell"
+info<-info[which(info$cell%in%rownames(meth_mtx)),]
+
+# get the edges of the neighbor graph from the UMAP object
+neighbor_graph_edges <- 
+  tibble(from = rep(1:nrow(umap_obj$nn$euclidean$idx), times=ncol(umap_obj$nn$euclidean$idx)),
+         to = as.vector(umap_obj$nn$euclidean$idx),
+         weight = as.vector(umap_obj$nn$euclidean$dist)) %>%
+  filter(from != to) %>%
+  mutate(from = rownames(meth_mtx)[from],
+         to = rownames(meth_mtx)[to])
+
+# run Leiden clustering
+clust_obj <- neighbor_graph_edges %>%
+  igraph::graph_from_data_frame(directed=F) %>% 
+  igraph::cluster_leiden(resolution_parameter = .9)  # adjust the resolution parameter to your needs
+
+# put the clustering results into a data frame (tibble) for plotting
+clust_tbl <- tibble(
+  leiden_cluster = as.character(clust_obj$membership),
+  cell = clust_obj$names
+) %>% 
+  full_join(umap_tbl, by="cell")
+#按照簇上色
+clust_tbl %>% 
+  ggplot(aes(x = UMAP1, y = UMAP2, color = leiden_cluster)) +
+  geom_point() +
+  coord_fixed()
+
+
+#按照细胞类型上色
+umap_tbl <- left_join(umap_tbl, info, by = "cell")
+
+umap_tbl %>% 
+  ggplot(aes(x = UMAP1, y = UMAP2, color = cell_type)) +
+  geom_point() +
+  coord_fixed() +
+  theme_minimal()
+
+
+############查看每个簇中细胞数量
+#rm(cluster_cell_p)
+cluster_cell_p<-merge(umap_tbl,clust_tbl,by="cell")
+#cluster_cell_p_0.9<-cluster_cell_p
+#细胞类型数量
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==1),])
+table(aa[,5])
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==2),])
+table(aa[,5])
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==3),])
+table(aa[,5])
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==4),])
+table(aa[,5])
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==5),])
+table(aa[,5])
+aa<-as.data.frame(cluster_cell_p[which(cluster_cell_p$leiden_cluster==6),])
+table(aa[,5])
+
+
+
+#构建细胞注释信息的代码#############
+
+# 设置工作目录
+setwd("D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/tumor")
+
+# 读取CTC_tumor文件夹下的所有.cov文件名称，去掉.cov后缀
+pre_tumor_files <- list.files("CTC_tumor", pattern = "\\.cov$", full.names = FALSE)
+pre_tumor_files <- gsub("\\.cov$", "", pre_tumor_files)
+pre_tumor_files <- paste0(pre_tumor_files, ".cov") # 重新添加后缀，如果需要的话
+
+# 读取non_CTC_tumor文件夹下的所有.cov文件名称，去掉.cov后缀
+non_pre_tumor_files <- list.files("non_CTC_tumor", pattern = "\\.cov$", full.names = FALSE)
+non_pre_tumor_files <- gsub("\\.cov$", "", non_pre_tumor_files)
+non_pre_tumor_files <- paste0(non_pre_tumor_files, ".cov") # 重新添加后缀，如果需要的话
+
+# 创建分组信息
+group_info <- data.frame(
+  FileName = c(pre_tumor_files, non_pre_tumor_files),
+  Group = c(rep("pre_tumor", length(pre_tumor_files)), rep("non_pre_tumor", length(non_pre_tumor_files)))
+)
+
+# 保存分组信息到指定路径
+write.csv(group_info, "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/tumor/tumor_group_info.csv", row.names = FALSE)
+write.table(group_info, "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/tumor/group_info.txt", 
+            row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+
+
+
+#DSS######
+##################CTC    和     tumor_CTC###############################
+#提取两组CTC细胞-----------------------------
+cluster_VMR<-read.table("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\VMR_matrix\\0.9\\cluster_cell_0.9.txt",header=T)
+VMR_cluster_CTC<-cluster_VMR[which(cluster_VMR$cell_type=="CTC"),]
+VMR_CTC_tumor<-VMR_cluster_CTC[which(VMR_cluster_CTC$leiden_cluster=="1"|VMR_cluster_CTC$leiden_cluster=="5"),]
+VMR_CTC<-VMR_cluster_CTC[-which(VMR_cluster_CTC$leiden_cluster=="1"|VMR_cluster_CTC$leiden_cluster=="5"),]
+
+cluster_promoter<-read.table("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\promoter_matrix\\0.8\\cluster_cell_0.8.txt",header=T)
+promoter_cluster_CTC<-cluster_promoter[which(cluster_promoter$cell_type=="CTC"),]
+promoter_CTC_tumor<-promoter_cluster_CTC[which(promoter_cluster_CTC$leiden_cluster=="1"|promoter_cluster_CTC$leiden_cluster=="3"),]
+promoter_CTC<-promoter_cluster_CTC[-which(promoter_cluster_CTC$leiden_cluster=="1"|promoter_cluster_CTC$leiden_cluster=="3"),]
+
+
+a<-intersect(VMR_CTC_tumor$cell,promoter_CTC_tumor$cell)
+a                       #根据a中的细胞手动将CTC细胞分为   CTC和tumor_CTC两组
+##########################按组别和染色体合并数据---------------------------
+library(data.table)
+
+# 设置路径
+input_dir_ctc <- "/bioccNSW/xyl/CTC/methscan/DSS/CTC"       # 实验组原始数据
+input_dir_non <- "/bioccNSW/xyl/CTC/methscan/DSS/tumor_CTC"   # 对照组原始数据
+output_dir_ctc <- "/bioccNSW/xyl/CTC/methscan/DSS/chr_CTC" # 实验组染色体输出
+output_dir_non <- "/bioccNSW/xyl/CTC/methscan/DSS/chr_tumor_CTC" # 对照组染色体输出
+
+# 创建输出目录
+dir.create(output_dir_ctc, showWarnings = FALSE, recursive = TRUE)
+dir.create(output_dir_non, showWarnings = FALSE, recursive = TRUE)
+
+# 常染色体列表（排除X/Y）
+chromosomes <- paste0("chr", 1:22)  
+
+# 函数：合并某组所有样本的指定染色体数据
+merge_chr_for_group <- function(input_dir, output_dir, group_name) {
+  # 获取所有.cov文件
+  cov_files <- list.files(input_dir, pattern = "\\.cov$", full.names = TRUE)
+  
+  # 逐染色体处理
+  for (chr in chromosomes) {
+    message("Processing ", group_name, " | ", chr)
+    chr_data_list <- lapply(cov_files, function(f) {
+      dt <- fread(f)
+      dt <- as.data.frame(dt)
+      dt <- dt[dt$chr == chr,]  # 提取当前染色体数据
+      dt <- as.data.table(dt)
+      dt[, sample_id := tools::file_path_sans_ext(basename(f))]  # 添加样本ID列
+      return(dt)
+    })
+    
+    # 合并所有样本的当前染色体数据
+    merged_chr <- rbindlist(chr_data_list)
+    
+    # 保存为单个文件（格式：chr{1-22}.cov）
+    output_file <- file.path(output_dir, paste0(chr, ".cov"))
+    fwrite(merged_chr, output_file, sep = "\t", quote = FALSE)
+    message("Saved ", chr, " with ", length(unique(merged_chr$sample_id)), " samples")
+  }
+}
+
+# 合并实验组和对照组数据
+merge_chr_for_group(input_dir_ctc, output_dir_ctc, "CTC")
+merge_chr_for_group(input_dir_non, output_dir_non, "tumor_CTC")
+
+
+##########################分染色体差异分析---------------------------
+library(DSS)
+library(bsseq)
+library(data.table) 
+# 设置路径
+dir_ctc <- "/bioccNSW/xyl/CTC/methscan/DSS/chr_CTC"  # 实验组染色体数据
+dir_non <- "/bioccNSW/xyl/CTC/methscan/DSS/chr_tumor_CTC" # 对照组染色体数据
+output_file <- "/bioccNSW/xyl/CTC/methscan/DSS/dml_results.rds" # 最终结果
+output_dir <- "/bioccNSW/xyl/CTC/methscan/DSS/chr_result" # 单个染色体结果目录
+# 创建输出目录（如果不存在）
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# 初始化结果存储
+results <- list()
+
+for (chr in paste0("chr", 1:22)) {
+  
+  message("\nProcessing ", chr, " | ", Sys.time())
+  
+  # 读取实验组和对照组的染色体文件
+  file_ctc <- file.path(dir_ctc, paste0(chr, ".cov"))
+  file_non <- file.path(dir_non, paste0(chr, ".cov"))
+  
+  if (!file.exists(file_ctc) || !file.exists(file_non)) {
+    message("Missing data for ", chr, ", skipping...")
+    next
+  }
+  
+  # 读取数据并标记组别
+  ctc_data <- fread(file_ctc)[, group := "CTC"]
+#  ctc_data<-ctc_data[,-6]
+  non_data <- fread(file_non)[, group := "tumor_CTC"]
+#  non_data<-non_data[,-6]
+  combined <- rbind(ctc_data, non_data)
+  
+  # 转换为BSseq对象（按样本拆分）
+  bs_data <- makeBSseqData(
+    split(combined, by = "sample_id"),
+    sampleNames = unique(combined$sample_id)
+  )
+  
+  # 添加组别信息到BSseq对象
+  colData(bs_data)$group <- factor(combined[match(colnames(bs_data), sample_id), group])
+  
+  # 差异分析
+  tryCatch({
+    dml <- DMLtest(
+      bs_data,
+      group1 = which(colData(bs_data)$group == "CTC"),
+      group2 = which(colData(bs_data)$group == "tumor_CTC")
+    )
+    
+    # 添加染色体信息
+    dml$chr <- chr
+    
+    # 保存单个染色体结果
+    chr_output <- file.path(output_dir, paste0(chr, "_result.rds"))
+    saveRDS(dml, chr_output)
+    message("Saved individual result for ", chr, " to: ", chr_output)
+    
+    # 存储到合并列表
+    results[[chr]] <- dml
+    message("Completed ", chr, " | ", nrow(dml), " CpGs tested")
+    
+    rm(ctc_data, non_data, combined, bs_data, dml); gc()
+  }, error = function(e) {
+    message("Error in ", chr, ": ", e$message)
+  })
+}
+
+# 合并所有染色体结果
+final_result <- do.call(rbind, results)
+saveRDS(final_result, output_file)
+message("\nAnalysis completed. Results saved to: ", output_file)
+
+
+
+###########开始分析差异甲基化              位点###################################
+library(annotatr)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(DSS)
+# 输入文件路径
+dml_file <- "D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\DSS\\CTC和CTC_tumor关系\\dml_results.rds"
+
+# Step 1: 读取并筛选
+dml <- readRDS(dml_file)
+
+dml <- callDML(dml, delta=0.1, p.threshold=0.001)
+##
+# 查看 diff 的分布情况
+summary(dml$diff)
+hist(dml$diff, breaks = 100, col = "skyblue", main = "Histogram of diff")
+
+# 查看 diff.se 的分布情况
+summary(dml$diff.se)
+hist(dml$diff.se, breaks = 100, col = "salmon", main = "Histogram of diff.se")
+
+# 出现次数最多的 diff / diff.se 值（mode 没那么靠谱，但可以看看集中趋势）
+sort(table(round(dml$diff, 3)), decreasing = TRUE)[1:10]
+sort(table(round(dml$diff.se, 3)), decreasing = TRUE)[1:10]
+
+
+plot(dml$diff, dml$diff.se,
+     pch = 20, col = rgb(0,0,0,0.2),
+     xlab = "diff", ylab = "diff.se",
+     main = "Effect size vs SE")
+abline(h = 0.3, col = "red", lty = 2)  # 可视化不稳定区域
+
+
+#筛选高低甲基化位点
+
+
+dml <- dml %>%
+  mutate(
+    direction = case_when(
+      diff > 0.2 ~ "Hypermethylated",
+      diff < -0.2 ~ "Hypomethylated",
+      TRUE ~ "Not Sig"
+    )
+  )
+table(dml$direction)
+saveRDS(dml,"D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\DSS\\CTC和CTC_tumor关系\\dml_results_filter.rds")
+
+#基因功能区域分布----------------------
+library(GenomicRanges)
+library(rtracklayer)
+library(tidyverse)
+
+dml<-readRDS("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\DSS\\CTC和CTC_tumor关系\\dml_results_filter.rds")
+dmr<-dml[,c(1,2,12,13)]
+dmr$postprob.overThreshold<-dmr$pos
+colnames(dmr)<-c("chr", "start", "end", "type")
+table(dmr$type)
+
+# 构建 GRanges 对象
+dmc_gr <- GRanges(
+  seqnames = dmr$chr,
+  ranges = IRanges(start = dmr$start, end = dmr$end),
+  meth_status = dmr$type
+)
+
+
+# 区域注释 bed 文件路径
+region_names <- c("3UTR", "5UTR", "CGI", "Enhancer", "LTR", "promoter", "rmsk", "SINE", "VMR")
+region_paths <- file.path("D:/CTC甲基化谱/基因区域注释文件", paste0(region_names, ".bed"))
+
+
+# 定义交集统计函数
+count_overlap_dmc <- function(region_path, region_name) {
+  cat("Processing:", region_name, "\n")
+  region_bed <- import(region_path)
+  
+  # 修复chr不一致问题
+  if (any(grepl("^chr", seqlevels(region_bed))) && !any(grepl("^chr", seqlevels(dmc_gr)))) {
+    seqlevels(dmc_gr) <- paste0("chr", seqlevels(dmc_gr))
+  } else if (!any(grepl("^chr", seqlevels(region_bed))) && any(grepl("^chr", seqlevels(dmc_gr)))) {
+    seqlevels(region_bed) <- paste0("chr", seqlevels(region_bed))
+  }
+  
+  # 分别统计
+  hyper <- sum(countOverlaps(dmc_gr[dmc_gr$meth_status == "Hypermethylated"], region_bed) > 0)
+  hypo  <- sum(countOverlaps(dmc_gr[dmc_gr$meth_status == "Hypomethylated"], region_bed) > 0)
+  
+  tibble(region = region_name,
+         Hypermethylated = hyper,
+         Hypomethylated = hypo)
+}
+
+# 批量统计并整理格式
+overlap_stats_dmc <- map2_dfr(region_paths, region_names, count_overlap_dmc) %>%
+  pivot_longer(cols = c(Hypermethylated, Hypomethylated),
+               names_to = "meth_status", values_to = "count")
+
+
+# 可视化
+ggplot(overlap_stats_dmc, aes(x = region, y = count, fill = meth_status)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.75) +
+  scale_fill_manual(values = c("Hypermethylated" = "#EF5A50", "Hypomethylated" = "#5E8FB9"),
+                    name = "Methylation Type") +
+  labs(title = "DMCs Enrichment in Genomic Functional Regions",
+       x = "Genomic Region", y = "Number of DMCs") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+#绘制染色体分布-----------
+library(ggplot2)
+library(dplyr)
+library(forcats)
+dml<-readRDS("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\DSS\\CTC和CTC_tumor关系\\dml_results_filter.rds")
+
+dmr<-dml[,c(1,2,12,13)]
+dmr$postprob.overThreshold<-dmr$pos
+colnames(dmr)<-c("chr", "start", "end", "type")
+table(dmr$chr)
+table(dmr$type)
+# 确保染色体顺序正确 (chr1, chr2,..., chr22)
+dmr$chr <- factor(dmr$chr, levels = paste0("chr", 1:22))
+
+# 计算每条染色体的甲基化位点计数
+count_data <- dmr %>%
+  group_by(chr, type) %>%
+  summarise(count = n(), .groups = "drop")
+
+# 创建柱状图
+ggplot(count_data, aes(x = chr, y = count, fill = type)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  scale_fill_manual(values = c("Hypermethylated" = "#EF5A50", "Hypomethylated" = "#5E8FB9")) +
+  labs(title = "DMR Counts by Chromosome",
+       x = "Chromosome",
+       y = "Number of DMRs",
+       fill = "Methylation Type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.major = element_line(color = "gray90"),
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = "bold")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) # 调整y轴扩展
+###############开始分析差异甲基化          区域#######################
+
+
+
+library(annotatr)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(DSS)
+
+
+# Step 1: 读取并筛选，使用的是未筛选的差异甲基化位点分析
+dml<-readRDS("D:\\CTC甲基化谱\\methscan（只用癌症和CTC）\\data\\DSS\\CTC和CTC_tumor关系\\dml_results.rds")
+rownames(dml)<-NULL  #改变行名为默认
+dmr <- callDMR(dml, delta=0.1, p.threshold=0.05)#识别差异甲基化区域
+head(dmr)
+rownames(dmr)<-NULL  #改变行名为默认
+
+# 查看 diff 的分布情况
+summary(dmr$diff)
+hist(dmr$diff, breaks = 100, col = "skyblue", main = "Histogram of diff")
+
+#提取高低甲基化区域
+
+# 使用0.2阈值分类（中间的不分类）
+dmr <- dmr %>%
+  mutate(meth_status = case_when(
+    diff.Methy >= 0.2 ~ "Hypermethylated",
+    diff.Methy <= -0.2 ~ "Hypomethylated",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(meth_status))
+table(dmr$meth_status)
+
+
+#绘制染色体分布-------------------------
+# 统计数量
+chr_dist <- dmr %>%
+  group_by(chr, meth_status) %>%
+  summarise(count = n(), .groups = 'drop')
+
+# 绘图（与上传图片风格一致）
+ggplot(chr_dist, aes(x = chr, y = count, fill = meth_status)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.75) +
+  scale_fill_manual(values = c("Hypermethylated" = "#EF5A50", "Hypomethylated" = "#5E8FB9"),
+                    name = "Methylation Type") +
+  labs(title = "DMR Counts by Chromosome",
+       x = "Chromosome", y = "Number of DMRs") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold", hjust = 0.5))
+#基因功能区域分布-------------------------------
+# 需要的 R 包
+library(GenomicRanges)
+library(rtracklayer)
+library(tidyverse)
+
+# 读取你的 DMR 数据（这里假设你已经有 dmr 这个 data.frame）
+# 如果在 CSV 或 Excel 中，用 read.csv / read_excel 读入
+# dmr <- read.csv("你的DMR结果.csv")
+
+# 构造 GRanges 对象（带 meth_status）
+dmr_gr <- GRanges(
+  seqnames = dmr$chr,
+  ranges = IRanges(start = dmr$start, end = dmr$end),
+  meth_status = dmr$meth_status
+)
+
+
+# 设置功能注释区域 bed 文件路径
+region_names <- c("3UTR", "5UTR", "CGI", "Enhancer", "LTR", "promoter", "rmsk", "SINE", "VMR")
+region_paths <- file.path("D:/CTC甲基化谱/基因区域注释文件", paste0(region_names, ".bed"))
+
+
+# 统计交集函数（带 chr 修复 + debug 输出）
+count_overlap <- function(region_path, region_name) {
+  cat("Processing region:", region_name, "\n")
+  
+  # 导入 bed 文件
+  region_bed <- import(region_path)
+  
+  # 染色体名修复
+  if (any(grepl("^chr", seqlevels(region_bed))) && !any(grepl("^chr", seqlevels(dmr_gr)))) {
+    seqlevels(dmr_gr) <- paste0("chr", seqlevels(dmr_gr))
+  } else if (!any(grepl("^chr", seqlevels(region_bed))) && any(grepl("^chr", seqlevels(dmr_gr)))) {
+    seqlevels(region_bed) <- paste0("chr", seqlevels(region_bed))
+  }
+  
+  # 调试输出
+  cat("Region contains", length(region_bed), "intervals\n")
+  cat("DMR total:", length(dmr_gr), "\n")
+  
+  # 分别统计 hyper / hypo 的交集数
+  hyper_count <- sum(countOverlaps(dmr_gr[dmr_gr$meth_status == "Hypermethylated"], region_bed) > 0)
+  hypo_count  <- sum(countOverlaps(dmr_gr[dmr_gr$meth_status == "Hypomethylated"], region_bed) > 0)
+  
+  tibble(
+    region = region_name,
+    Hypermethylated = hyper_count,
+    Hypomethylated = hypo_count
+  )
+}
+
+
+# 统计所有区域的交集
+overlap_stats <- map2_dfr(region_paths, region_names, count_overlap) %>%
+  pivot_longer(cols = c(Hypermethylated, Hypomethylated),
+               names_to = "meth_status", values_to = "count")
+
+
+# 绘图
+ggplot(overlap_stats, aes(x = region, y = count, fill = meth_status)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.75) +
+  scale_fill_manual(values = c("Hypermethylated" = "#EF5A50", "Hypomethylated" = "#5E8FB9"),
+                    name = "Methylation Type") +
+  labs(title = "DMRs Enrichment in Genomic Functional Regions",
+       x = "Genomic Region", y = "Number of DMRs") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+#甲基化水平代码##########
+# ==================== 环境与路径设置 ====================
+library(data.table)
+library(ggplot2)
+library(ggpubr)
+
+# ---------------------------
+# 数据目录
+# ---------------------------
+cov_MP_dir     <- "/data2/home/xuyl/xyl/methscan/tumor/CTC_tumor"        # MP 癌细胞
+cov_nonMP_dir  <- "/data2/home/xuyl/xyl/methscan/tumor/non_CTC_tumor"   # 非MP 癌细胞
+cov_normal_dir <- "/data2/home/xuyl/xyl/methscan/normal"                # 正常细胞
+cov_ctc1_dir   <- "/data2/home/xuyl/xyl/methscan/CTC/CTC"                 # CTC亚型1
+cov_ctc2_dir   <- "/data2/home/xuyl/xyl/methscan/CTC/tumor_CTC"                 # CTC亚型2
+
+anno_dir <- "/data2/home/xuyl/xyl/methscan/feature_annotion"
+
+features <- c("3UTR", "5UTR", "CGI", "promoter", "Enhancer", "LTR", "LINE", "SINE", "VMR")
+valid_chroms <- paste0("chr", 1:22)
+
+# ==================== 构建文件表 ====================
+get_cell_id <- function(path) tools::file_path_sans_ext(basename(path))
+get_file_table <- function(dir, group_label) {
+  files <- list.files(dir, pattern = "\\.cov$", full.names = TRUE)
+  if (length(files) == 0) return(NULL)
+  data.frame(file = files, cell = get_cell_id(files), group = group_label)
+}
+
+# 分别读取四组
+MP_files     <- get_file_table(cov_MP_dir, "MP")
+nonMP_files  <- get_file_table(cov_nonMP_dir, "nonMP")
+normal_files <- get_file_table(cov_normal_dir, "Normal")
+ctc1_files   <- get_file_table(cov_ctc1_dir, "CTC")
+ctc2_files   <- get_file_table(cov_ctc2_dir, "CTC")
+
+# 合并所有文件表
+all_files <- rbindlist(list(MP_files, nonMP_files, normal_files, ctc1_files, ctc2_files), fill = TRUE)
+
+# ==================== 功能区域甲基化水平 ====================
+feature_results <- list()
+
+for (feature in features) {
+  cat("Processing feature:", feature, "\n")
+  
+  bed_path <- file.path(anno_dir, paste0(feature, ".bed"))
+  region <- fread(bed_path, select = 1:3, col.names = c("chr", "start", "end"))
+  region <- region[chr %in% valid_chroms]
+  setkey(region, chr, start, end)
+  
+  feature_data <- list()
+  
+  for (i in 1:nrow(all_files)) {
+    row <- all_files[i, ]
+    dt <- fread(row$file, col.names = c("chr", "pos", "N", "X"))
+    dt <- dt[chr %in% valid_chroms & N > 0]
+    dt[, start := pos - 1]
+    dt[, end := pos]
+    setkey(dt, chr, start, end)
+    
+    olap <- foverlaps(dt, region, nomatch = 0L)
+    if (nrow(olap) == 0) next
+    
+    meth <- sum(olap$X) / sum(olap$N)
+    feature_data[[length(feature_data) + 1]] <- data.frame(
+      cell = row$cell,
+      group = row$group,
+      feature = feature,
+      methylation = meth
+    )
+    rm(dt, olap); gc()
+  }
+  
+  feature_results[[feature]] <- rbindlist(feature_data)
+}
+
+region_df <- rbindlist(feature_results)
+
+# ==================== 全基因组甲基化水平 ====================
+global_data <- rbindlist(lapply(1:nrow(all_files), function(i) {
+  row <- all_files[i, ]
+  dt <- fread(row$file, col.names = c("chr", "pos", "N", "X"))
+  dt <- dt[chr %in% valid_chroms & N > 0]
+  meth <- sum(dt$X) / sum(dt$N)
+  data.frame(cell = row$cell, group = row$group, feature = "Global", methylation = meth)
+}))
+
+# ==================== 合并输出 ====================
+combined_df <- rbind(region_df, global_data)
+fwrite(combined_df, "/data2/home/xuyl/xyl/methscan/tumor/result/methylation_all_four_groups.csv")
+
+# ==================== 可视化 ====================
+comparisons <- list(
+  c("MP", "nonMP"),
+  c("MP", "CTC"),
+  c("MP", "Normal"),
+  c("CTC", "Normal"),
+  c("nonMP", "Normal")
+)
+
+p <- ggplot(combined_df, aes(x = feature, y = methylation, fill = group)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.8), alpha = 0.8) +
+  # geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+  #             size = 0.8, alpha = 0.4) +
+  stat_compare_means(aes(group = group),
+                     comparisons = comparisons,
+                     method = "wilcox.test",
+                     label = "p.signif",
+                     position = position_dodge(width = 0.8),
+                     tip.length = 0.01) +
+  scale_fill_manual(values = c("Normal" = "#00A087", 
+                               "nonMP" = "#4DBBD5", 
+                               "MP" = "#E64B35", 
+                               "CTC" = "#F39C12")) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Methylation Levels across Functional Regions",
+       x = "Functional Region",
+       y = "Methylation Ratio") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top")
+
+ggsave("/data2/home/xuyl/xyl/methscan/tumor/result/methylation_all_regions_four_groups_boxplot.pdf",
+       plot = p, width = 10, height = 6)
+
+
+# ==================== 全基因组甲基化：每细胞平均水平 ====================
+
+
+# 计算每个细胞的全基因组甲基化水平（∑X / ∑N）
+global_df <- data.table::rbindlist(lapply(seq_len(nrow(all_files)), function(i) {
+  row <- all_files[i, ]
+  dt  <- data.table::fread(row$file, col.names = c("chr","pos","N","X"))
+  dt  <- dt[chr %in% valid_chroms & N > 0]
+  meth <- sum(dt$X) / sum(dt$N)
+  data.frame(cell = row$cell, group = row$group, methylation = meth, stringsAsFactors = FALSE)
+}))
+
+# 导出全基因组甲基化结果（每细胞一行）
+data.table::fwrite(global_df, "/data2/home/xuyl/xyl/methscan/tumor/result/global_methylation_per_cell.csv")
+
+# 和功能区结果合并（可选：把 Global 当作一个feature一起画）
+global_as_feature <- within(global_df, { feature <- "Global" })
+combined_df <- data.table::rbindlist(list(region_df, global_as_feature), fill = TRUE)
+
+# ==================== 全基因组甲基化：四组比较图（箱线 + 抖动 + 显著性） ====================
+# 动态生成组间两两比较列表
+grp <- unique(global_df$group)
+comparisons_global <- if (length(grp) >= 2) {
+  combn(grp, 2, simplify = FALSE)
+} else list()
+
+p_global <- ggplot(global_df, aes(x = group, y = methylation, fill = group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.85, width = 0.7) +
+#  geom_jitter(width = 0.12, size = 0.9, alpha = 0.5) +
+  ggpubr::stat_compare_means(comparisons = comparisons_global,
+                             method = "wilcox.test",
+                             label = "p.signif",
+                             tip.length = 0.01) +
+  scale_fill_manual(values = c("Normal" = "#00A087",
+                               "nonMP"  = "#4DBBD5",
+                               "MP"     = "#E64B35",
+                               "CTC"    = "#F39C12")) +
+  labs(title = "Global DNA methylation across cell types",
+       x = NULL,
+       y = "Mean methylation per cell (∑X/∑N)") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 12))
+
+ggsave("/data2/home/xuyl/xyl/methscan/tumor/result/global_methylation_by_group.pdf",
+       plot = p_global, width = 6.5, height = 4.8)
+
+
+
+
+#异质性代码############
+
+# ==================== 环境与路径设置 ====================
+library(data.table)
+library(ggplot2)
+library(ggpubr)
+
+# ---------------------------
+# 数据目录（与你给的一致）
+# ---------------------------
+cov_MP_dir     <- "/data2/home/xuyl/xyl/methscan/tumor/CTC_tumor"        # MP 癌细胞
+cov_nonMP_dir  <- "/data2/home/xuyl/xyl/methscan/tumor/non_CTC_tumor"   # 非MP 癌细胞
+cov_normal_dir <- "/data2/home/xuyl/xyl/methscan/normal"                # 正常细胞
+cov_ctc1_dir   <- "/data2/home/xuyl/xyl/methscan/CTC/CTC"               # CTC亚型1
+cov_ctc2_dir   <- "/data2/home/xuyl/xyl/methscan/CTC/tumor_CTC"         # CTC亚型2
+
+anno_dir <- "/data2/home/xuyl/xyl/methscan/feature_annotion"
+
+features <- c("3UTR", "5UTR", "CGI", "promoter", "Enhancer", "LTR", "LINE", "SINE", "VMR")
+valid_chroms <- paste0("chr", 1:22)
+
+# ==================== 构建文件表（保持不变） ====================
+get_cell_id <- function(path) tools::file_path_sans_ext(basename(path))
+get_file_table <- function(dir, group_label) {
+  files <- list.files(dir, pattern = "\\.cov$", full.names = TRUE)
+  if (length(files) == 0) return(NULL)
+  data.frame(file = files, cell = get_cell_id(files), group = group_label)
+}
+
+# 分别读取四组（CTC1/CTC2 合并为 "CTC"）
+MP_files     <- get_file_table(cov_MP_dir, "MP")
+nonMP_files  <- get_file_table(cov_nonMP_dir, "nonMP")
+normal_files <- get_file_table(cov_normal_dir, "Normal")
+ctc1_files   <- get_file_table(cov_ctc1_dir, "CTC")
+ctc2_files   <- get_file_table(cov_ctc2_dir, "CTC")
+
+all_files <- rbindlist(list(MP_files, nonMP_files, normal_files, ctc1_files, ctc2_files), fill = TRUE)
+print(table(all_files$group))
+
+# ==================== 异质性指标函数 ====================
+# 覆盖度加权平均
+w_mean <- function(x, w) {
+  w <- as.numeric(w)
+  if (length(x) == 0 || sum(w) == 0) return(NA_real_)
+  sum(w * x, na.rm = TRUE) / sum(w, na.rm = TRUE)
+}
+
+# 覆盖度加权方差（与 w_mean 配套）
+w_var <- function(x, w) {
+  w <- as.numeric(w)
+  if (length(x) <= 1 || sum(w) == 0) return(NA_real_)
+  m <- w_mean(x, w)
+  sum(w * (x - m)^2, na.rm = TRUE) / sum(w, na.rm = TRUE)
+}
+
+# Shannon entropy（覆盖度加权均值）：H = -[p log2 p + (1-p) log2 (1-p)]
+# p=0或1时定义 H=0；避免log(0) 用极小eps
+entropy_weighted <- function(p, w, eps = 1e-12) {
+  p <- pmin(pmax(p, eps), 1 - eps)
+  h <- -(p * log2(p) + (1 - p) * log2(1 - p))
+  w_mean(h, w)
+}
+
+# ==================== 1) 全基因组甲基化异质性（每细胞） ====================
+global_hetero <- rbindlist(lapply(seq_len(nrow(all_files)), function(i) {
+  row <- all_files[i, ]
+  dt  <- fread(row$file, col.names = c("chr","pos","N","X"))
+  dt  <- dt[chr %in% valid_chroms & N > 0]
+  if (nrow(dt) == 0) {
+    return(data.frame(cell = row$cell, group = row$group,
+                      hetero_entropy = NA_real_,
+                      hetero_var = NA_real_))
+  }
+  p <- dt$X / dt$N
+  he <- entropy_weighted(p, dt$N)
+  hv <- w_var(p, dt$N)
+  data.frame(cell = row$cell, group = row$group,
+             hetero_entropy = he,
+             hetero_var = hv)
+}))
+
+fwrite(global_hetero, "/data2/home/xuyl/xyl/methscan/tumor/result/global_heterogeneity.csv")
+print(head(global_hetero))
+
+# 可选：画全局异质性（entropy）四组比较图
+grp <- unique(global_hetero$group)
+comparisons_global <- if (length(grp) >= 2) combn(grp, 2, simplify = FALSE) else list()
+
+#在这里根据使用  hetero_entropy   还是   hetero_var   来选择不同的异质性指标
+p_global_hetero <- ggplot(global_hetero, aes(x = group, y = hetero_entropy, fill = group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.85, width = 0.7) +
+#  geom_jitter(width = 0.12, size = 0.9, alpha = 0.5) +
+  ggpubr::stat_compare_means(comparisons = comparisons_global,
+                             method = "wilcox.test",
+                             label = "p.signif",
+                             tip.length = 0.01) +
+  scale_fill_manual(values = c("Normal" = "#00A087",
+                               "nonMP"  = "#4DBBD5",
+                               "MP"     = "#E64B35",
+                               "CTC"    = "#F39C12")) +
+  labs(title = "Global methylation heterogeneity",
+       x = NULL, y = "Weighted Shannon entropy") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 12))
+
+ggsave("/data2/home/xuyl/xyl/methscan/tumor/result/entropy_global_heterogeneity.pdf",
+       plot = p_global_hetero, width = 6.5, height = 4.8)
+
+
+# ==================== 2) 基因功能区域甲基化异质性（每细胞×每区域） ====================
+feature_hetero_list <- vector("list", length(features))
+names(feature_hetero_list) <- features
+
+for (fi in seq_along(features)) {
+  feature <- features[fi]
+  cat("[Feature heterogeneity] Processing:", feature, "\n")
+  
+  # 读取功能区 BED
+  bed_path <- file.path(anno_dir, paste0(feature, ".bed"))
+  region <- fread(bed_path, select = 1:3, col.names = c("chr", "start", "end"))
+  region <- region[chr %in% valid_chroms]
+  setkey(region, chr, start, end)
+  
+  per_feature <- vector("list", nrow(all_files))
+  
+  for (i in seq_len(nrow(all_files))) {
+    row <- all_files[i, ]
+    dt  <- fread(row$file, col.names = c("chr","pos","N","X"))
+    dt  <- dt[chr %in% valid_chroms & N > 0]
+    if (nrow(dt) == 0) {
+      per_feature[[i]] <- data.frame(cell = row$cell, group = row$group,
+                                     feature = feature,
+                                     hetero_entropy = NA_real_,
+                                     hetero_var = NA_real_)
+      next
+    }
+    # 构造区间用于 foverlaps
+    dt[, start := pos - 1]
+    dt[, end   := pos]
+    setkey(dt, chr, start, end)
+    
+    olap <- foverlaps(dt, region, nomatch = 0L)
+    if (nrow(olap) == 0) {
+      per_feature[[i]] <- data.frame(cell = row$cell, group = row$group,
+                                     feature = feature,
+                                     hetero_entropy = NA_real_,
+                                     hetero_var = NA_real_)
+      next
+    }
+    p  <- olap$X / olap$N
+    he <- entropy_weighted(p, olap$N)
+    hv <- w_var(p, olap$N)
+    
+    per_feature[[i]] <- data.frame(cell = row$cell, group = row$group,
+                                   feature = feature,
+                                   hetero_entropy = he,
+                                   hetero_var = hv)
+    rm(dt, olap); gc()
+  }
+  
+  feature_hetero_list[[fi]] <- rbindlist(per_feature)
+}
+
+feature_hetero <- rbindlist(feature_hetero_list, fill = TRUE)
+fwrite(feature_hetero, "/data2/home/xuyl/xyl/methscan/tumor/result/feature_heterogeneity.csv")
+print(head(feature_hetero))
+
+# 可选：按功能区画异质性（Entropy）比较（分面展示）
+
+#在这里根据使用  hetero_entropy   还是   hetero_var   来选择不同的异质性指标
+
+# ==================== 功能区域甲基化异质性：一张图展示四组 ====================
+
+# 只保留有值的行
+feature_hetero_plot <- subset(feature_hetero, !is.na(hetero_entropy))
+
+# 保持功能区域在横轴的顺序（按你定义的 features 向量）
+feature_hetero_plot$feature <- factor(feature_hetero_plot$feature, levels = features)
+
+# 组间两两比较列表（自动从数据里拿到现有组）
+grp_feat <- unique(feature_hetero_plot$group)
+comparisons_feat <- if (length(grp_feat) >= 2) combn(grp_feat, 2, simplify = FALSE) else list()
+
+p_feat_all <- ggplot(feature_hetero_plot, aes(x = feature, y = hetero_var, fill = group)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.8), alpha = 0.85) +
+  # geom_jitter(position = position_jitterdodge(jitter.width = 0.20, dodge.width = 0.8),
+  #             size = 0.8, alpha = 0.45) +
+  ggpubr::stat_compare_means(
+    aes(group = group),
+    comparisons = comparisons_feat,
+    method = "wilcox.test",
+    label = "p.signif",
+    position = position_dodge(width = 0.8),
+    tip.length = 0.01
+  ) +
+  scale_fill_manual(values = c("Normal" = "#00A087",
+                               "nonMP"  = "#4DBBD5",
+                               "MP"     = "#E64B35",
+                               "CTC"    = "#F39C12")) +
+  labs(
+    title = "Methylation heterogeneity (entropy) across functional regions",
+    x = "Functional Region",
+    y = "Weighted Shannon entropy"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top"
+  )
+
+print(p_feat_all)
+
+ggsave("/data2/home/xuyl/xyl/methscan/tumor/result/var_feature_heterogeneity.pdf",
+       plot = p_feat_all, width = 10, height = 6)
+
+
+

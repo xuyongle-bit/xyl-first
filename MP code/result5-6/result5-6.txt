@@ -1,0 +1,825 @@
+Result 5-6 第五版模型完整代码
+
+======================================================================
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(purrr)
+  library(stringr)
+  library(glmnet)
+  library(caret)
+  library(pROC)
+  library(PRROC)
+  library(ggplot2)
+  library(survival)
+  library(survminer)
+  library(timeROC)
+  library(edgeR)
+  library(matrixStats)
+  library(GenomicRanges)
+  library(ChIPseeker)
+  library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+  library(org.Hs.eg.db)
+  library(zoo)
+})
+
+set.seed(42)
+
+root_dir <- "D:/CTC甲基化谱/methscan（只用癌症和CTC）/data/多模态模型构建"
+out_dir <- file.path(root_dir, "第五版模型")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+dirs <- list(
+  model = file.path(out_dir, "01_MPScan_model"),
+  expanded = file.path(out_dir, "02_expanded_evaluation"),
+  benign = file.path(out_dir, "03_benign_malignant"),
+  tcga = file.path(out_dir, "04_TCGA_survival"),
+  rna = file.path(out_dir, "05_RNA_distillation"),
+  logs = file.path(out_dir, "logs")
+)
+invisible(lapply(dirs, dir.create, recursive = TRUE, showWarnings = FALSE))
+sink(file.path(dirs$logs, "v5_run_console.log"), split = TRUE)
+on.exit(sink(), add = TRUE)
+
+message(">>> MP-Scan v5 pipeline started: ", Sys.time())
+
+find_first <- function(paths) {
+  hit <- paths[file.exists(paths)]
+  if (!length(hit)) stop("No existing file among: ", paste(paths, collapse = " | "))
+  hit[[1]]
+}
+
+matrix_files <- list(
+  CNV = find_first(c(file.path(root_dir, "模型矩阵/CNV_matrix/methylation_fractions.csv"))),
+  VMR = find_first(c(file.path(root_dir, "模型矩阵/vmr_matrix/methylation_fractions.csv"),
+                     file.path(root_dir, "模型矩阵/VMR_matrix/methylation_fractions.csv"))),
+  DMR = find_first(c(file.path(root_dir, "模型矩阵/DMR_matrix/methylation_fractions.csv"))),
+  Promoter = find_first(c(file.path(root_dir, "模型矩阵/promoter_matrix/methylation_fractions.csv"),
+                          file.path(root_dir, "模型矩阵/Promoter_matrix/methylation_fractions.csv"))),
+  TF = find_first(c(file.path(root_dir, "模型矩阵/tf_matrix/methylation_fractions.csv"),
+                    file.path(root_dir, "模型矩阵/TF_matrix/methylation_fractions.csv")))
+)
+
+external_files <- list(
+  VMR = find_first(c(file.path(root_dir, "模型矩阵/验证矩阵（all_sell）/VMR_matrix/methylation_fractions.csv"),
+                     file.path(root_dir, "模型矩阵/验证矩阵（all_sell）/vmr_matrix/methylation_fractions.csv"))),
+  Promoter = find_first(c(file.path(root_dir, "模型矩阵/验证矩阵（all_sell）/promoter_matrix/methylation_fractions.csv"),
+                          file.path(root_dir, "模型矩阵/验证矩阵（all_sell）/Promoter_matrix/methylation_fractions.csv"))),
+  DMR = find_first(c(file.path(root_dir, "模型矩阵/验证矩阵（all_sell）/DMR_matrix/methylation_fractions.csv")))
+)
+
+cell_groups_file <- file.path(root_dir, "tumor_cell_group.csv")
+all_group_file <- file.path(root_dir, "all_group.csv")
+benign_group_file <- file.path(root_dir, "第三版模型结果/师姐数据验证/group.csv")
+benign_files <- list(
+  VMR = find_first(c(file.path(root_dir, "第三版模型结果/师姐数据验证/甲基化矩阵/VMR_matrix/methylation_fractions.csv"),
+                     file.path(root_dir, "第三版模型结果/师姐数据验证/甲基化矩阵/vmr_matrix/methylation_fractions.csv"))),
+  Promoter = find_first(c(file.path(root_dir, "第三版模型结果/师姐数据验证/甲基化矩阵/promoter_matrix/methylation_fractions.csv"),
+                          file.path(root_dir, "第三版模型结果/师姐数据验证/甲基化矩阵/Promoter_matrix/methylation_fractions.csv"))),
+  DMR = find_first(c(file.path(root_dir, "第三版模型结果/师姐数据验证/甲基化矩阵/DMR_matrix/methylation_fractions.csv")))
+)
+
+detect_id_col <- function(df) {
+  candidates <- c("cell_id", "Cell_ID", "CellId", "sample_id", "Sample_ID",
+                  "sample", "Sample", "id", "ID", "X1", "...1")
+  hit <- candidates[candidates %in% names(df)]
+  if (length(hit)) return(hit[[1]])
+  if (ncol(df) >= 1 && (is.character(df[[1]]) || is.factor(df[[1]]))) {
+    if (length(unique(df[[1]])) / max(1, nrow(df)) > 0.95) return(names(df)[1])
+  }
+  stop("Cannot detect ID column.")
+}
+
+read_raw_matrix <- function(path) {
+  df <- suppressMessages(readr::read_csv(path, show_col_types = FALSE))
+  df <- as.data.frame(df)
+  idc <- detect_id_col(df)
+  rownames(df) <- as.character(df[[idc]])
+  df[[idc]] <- NULL
+  df <- df[, vapply(df, is.numeric, logical(1)), drop = FALSE]
+  if (!ncol(df)) stop("No numeric features in ", path)
+  as.matrix(df)
+}
+
+normalize_label <- function(x) {
+  x <- trimws(tolower(as.character(x)))
+  ifelse(x == "pre", 1L,
+         ifelse(x %in% c("non_pre", "non-pre", "nonpre", "nonpre "), 0L, NA_integer_))
+}
+
+stratified_split <- function(lbl, p_train = 0.60, p_val = 0.20) {
+  set.seed(42)
+  idx_train <- caret::createDataPartition(lbl, p = p_train, list = FALSE)
+  train_ids <- names(lbl)[idx_train]
+  rest_ids <- setdiff(names(lbl), train_ids)
+  idx_val <- caret::createDataPartition(lbl[rest_ids], p = p_val / (1 - p_train), list = FALSE)
+  val_ids <- rest_ids[idx_val]
+  test_ids <- setdiff(rest_ids, val_ids)
+  list(train = train_ids, val = val_ids, test = test_ids)
+}
+
+fit_preprocessor <- function(X_train_raw, keep_col_p = 0.20) {
+  keep <- colMeans(!is.na(X_train_raw)) >= keep_col_p
+  X <- X_train_raw[, keep, drop = FALSE]
+  if (!ncol(X)) stop("No features after train-only missingness filter.")
+  med <- apply(X, 2, function(v) median(v, na.rm = TRUE))
+  med[!is.finite(med)] <- 0
+  for (j in seq_len(ncol(X))) X[is.na(X[, j]), j] <- med[j]
+  center <- colMeans(X)
+  scale <- apply(X, 2, sd)
+  scale[!is.finite(scale) | scale == 0] <- 1
+  list(features = colnames(X), median = med, center = center, scale = scale)
+}
+
+transform_with_preprocessor <- function(X_raw, pp) {
+  X <- matrix(NA_real_, nrow = nrow(X_raw), ncol = length(pp$features),
+              dimnames = list(rownames(X_raw), pp$features))
+  common <- intersect(colnames(X_raw), pp$features)
+  if (length(common)) X[, common] <- X_raw[, common, drop = FALSE]
+  for (nm in pp$features) {
+    v <- X[, nm]
+    v[is.na(v)] <- pp$median[[nm]]
+    X[, nm] <- (v - pp$center[[nm]]) / pp$scale[[nm]]
+  }
+  X
+}
+
+class_weights <- function(lbl) {
+  tab <- table(lbl)
+  if (length(tab) < 2) return(rep(1, length(lbl)))
+  wpos <- as.numeric(sum(tab) / (2 * tab[["1"]]))
+  wneg <- as.numeric(sum(tab) / (2 * tab[["0"]]))
+  ifelse(lbl == 1, wpos, wneg)
+}
+
+fit_modality_oof <- function(X, y, ids, alpha = 1, K = 5) {
+  tr <- ids$train; vl <- ids$val; te <- ids$test
+  ytr <- y[tr]
+  foldid <- caret::createFolds(ytr, k = K, list = FALSE)
+  oof <- rep(NA_real_, length(tr)); names(oof) <- tr
+
+  for (k in seq_len(K)) {
+    fold_train_ids <- tr[foldid != k]
+    fold_oof_ids <- tr[foldid == k]
+    pp_k <- fit_preprocessor(X[fold_train_ids, , drop = FALSE])
+    Xk_train <- transform_with_preprocessor(X[fold_train_ids, , drop = FALSE], pp_k)
+    Xk_oof <- transform_with_preprocessor(X[fold_oof_ids, , drop = FALSE], pp_k)
+    w_k <- class_weights(y[fold_train_ids])
+    fit_k <- cv.glmnet(Xk_train, y[fold_train_ids], family = "binomial", alpha = alpha,
+                       type.measure = "auc", weights = w_k)
+    oof[fold_oof_ids] <- as.numeric(predict(fit_k, newx = Xk_oof, s = "lambda.min", type = "response"))
+  }
+
+  pp_full <- fit_preprocessor(X[tr, , drop = FALSE])
+  Xtr <- transform_with_preprocessor(X[tr, , drop = FALSE], pp_full)
+  Xvl <- transform_with_preprocessor(X[vl, , drop = FALSE], pp_full)
+  Xte <- transform_with_preprocessor(X[te, , drop = FALSE], pp_full)
+  w_full <- class_weights(ytr)
+  fit_full <- cv.glmnet(Xtr, ytr, family = "binomial", alpha = alpha,
+                        type.measure = "auc", weights = w_full)
+  list(
+    oof = oof,
+    train_fit = as.numeric(predict(fit_full, newx = Xtr, s = "lambda.min", type = "response")),
+    val = as.numeric(predict(fit_full, newx = Xvl, s = "lambda.min", type = "response")),
+    test = as.numeric(predict(fit_full, newx = Xte, s = "lambda.min", type = "response")),
+    fit = fit_full,
+    preprocessor = pp_full,
+    feature_n_raw = ncol(X),
+    feature_n_used = length(pp_full$features)
+  )
+}
+
+compute_auc <- function(y_true, prob) {
+  roc_obj <- pROC::roc(y_true, prob, quiet = TRUE)
+  pr_obj <- PRROC::pr.curve(scores.class0 = prob[y_true == 1],
+                            scores.class1 = prob[y_true == 0], curve = FALSE)
+  list(roc = roc_obj, roc_auc = as.numeric(pROC::auc(roc_obj)), pr_auc = pr_obj$auc.integral)
+}
+
+pr_auc_boot_ci <- function(y, p, B = 1000, seed = 1) {
+  set.seed(seed)
+  pos <- which(y == 1); neg <- which(y == 0)
+  if (!length(pos) || !length(neg)) return(c(lower = NA_real_, upper = NA_real_))
+  vals <- replicate(B, {
+    idx <- c(sample(pos, length(pos), TRUE), sample(neg, length(neg), TRUE))
+    PRROC::pr.curve(scores.class0 = p[idx][y[idx] == 1],
+                    scores.class1 = p[idx][y[idx] == 0])$auc.integral
+  })
+  c(lower = unname(quantile(vals, 0.025, na.rm = TRUE)),
+    upper = unname(quantile(vals, 0.975, na.rm = TRUE)))
+}
+
+pick_threshold <- function(y_val, p_val, target_sp = 0.90) {
+  r <- pROC::roc(y_val, p_val, quiet = TRUE)
+  coords_df <- suppressWarnings(pROC::coords(r, x = r$thresholds,
+                                             ret = c("specificity", "sensitivity", "threshold"),
+                                             transpose = FALSE))
+  ok <- which(coords_df$specificity >= target_sp)
+  if (!length(ok)) idx <- which.max(coords_df$specificity)
+  else idx <- ok[which.max(coords_df$sensitivity[ok])]
+  thr <- as.numeric(coords_df$threshold[idx])[[1]]
+  if (!is.finite(thr)) 0.5 else thr
+}
+
+metrics_at <- function(y_true, prob, thr) {
+  pred <- as.integer(prob >= thr)
+  TP <- sum(pred == 1 & y_true == 1); TN <- sum(pred == 0 & y_true == 0)
+  FP <- sum(pred == 1 & y_true == 0); FN <- sum(pred == 0 & y_true == 1)
+  tibble(Threshold = thr, TP = TP, FP = FP, TN = TN, FN = FN,
+         ACC = (TP + TN) / length(y_true),
+         SEN = TP / max(1, TP + FN),
+         SPE = TN / max(1, TN + FP),
+         PPV = TP / max(1, TP + FP),
+         NPV = TN / max(1, TN + FN),
+         F1 = ifelse((2 * TP + FP + FN) > 0, 2 * TP / (2 * TP + FP + FN), NA_real_),
+         BA = 0.5 * (TP / max(1, TP + FN) + TN / max(1, TN + FP)))
+}
+
+theme_pub <- function(base_size = 11) {
+  theme_bw(base_size = base_size) +
+    theme(panel.grid = element_blank(),
+          plot.title = element_text(face = "bold"),
+          legend.title = element_blank())
+}
+
+make_pr_df <- function(prob, y_true, label) {
+  pr <- PRROC::pr.curve(scores.class0 = prob[y_true == 1],
+                        scores.class1 = prob[y_true == 0], curve = TRUE)
+  curve <- as.data.frame(pr$curve)
+  names(curve)[1:2] <- c("Recall", "Precision")
+  curve$Model <- paste0(label, " (AUPRC=", sprintf("%.3f", pr$auc.integral), ")")
+  curve
+}
+
+save_roc_plot <- function(roc_list, filename, title) {
+  auc_vec <- sapply(roc_list, function(r) as.numeric(pROC::auc(r)))
+  names(roc_list) <- paste0(names(roc_list), " (AUC=", sprintf("%.3f", auc_vec), ")")
+  p <- pROC::ggroc(roc_list, size = 0.9) +
+    geom_abline(slope = 1, intercept = 0, linetype = 2, colour = "grey50") +
+    labs(title = title, x = "1 - Specificity", y = "Sensitivity", colour = "Model") +
+    theme_pub()
+  ggsave(filename, p, width = 7, height = 5)
+  p
+}
+
+save_pr_plot <- function(df_pr, filename, title) {
+  p <- ggplot(df_pr, aes(x = Recall, y = Precision, colour = Model)) +
+    geom_path(linewidth = 0.9) + labs(title = title) + theme_pub()
+  ggsave(filename, p, width = 7, height = 5)
+  p
+}
+
+# 1. Main MP-Scan model
+message(">>> Step 1: main MP-Scan model")
+cg <- readr::read_csv(cell_groups_file, show_col_types = FALSE)
+colnames(cg)[1:2] <- c("cell_id", "label")
+cg <- cg %>% mutate(label_num = normalize_label(label)) %>% filter(!is.na(label_num))
+y <- cg$label_num; names(y) <- cg$cell_id
+
+modal_list <- lapply(matrix_files, read_raw_matrix)
+common_ids <- Reduce(intersect, c(list(names(y)), lapply(modal_list, rownames)))
+y <- y[common_ids]
+modal_list <- lapply(modal_list, function(X) X[common_ids, , drop = FALSE])
+splits <- stratified_split(y)
+train_ids <- splits$train; val_ids <- splits$val; test_ids <- splits$test
+
+split_tbl <- bind_rows(
+  tibble(cell_id = train_ids, set = "Train", label = y[train_ids]),
+  tibble(cell_id = val_ids, set = "Validation", label = y[val_ids]),
+  tibble(cell_id = test_ids, set = "Test", label = y[test_ids])
+) %>% mutate(label_text = ifelse(label == 1, "pre", "non_pre"))
+write_csv(split_tbl, file.path(dirs$model, "数据划分_每个细胞所属集合.csv"))
+split_summary <- split_tbl %>% dplyr::count(set, label_text) %>%
+  pivot_wider(names_from = label_text, values_from = n, values_fill = 0)
+split_summary$total <- rowSums(split_summary[, setdiff(names(split_summary), "set")])
+write_csv(split_summary, file.path(dirs$model, "数据划分_汇总.csv"))
+print(split_summary)
+
+mod_results <- list()
+for (m in names(modal_list)) {
+  message(">>> Fitting modality: ", m, " raw features=", ncol(modal_list[[m]]))
+  mod_results[[m]] <- fit_modality_oof(modal_list[[m]], y, splits, alpha = 1, K = 5)
+}
+
+pred_train_tbl <- tibble(cell_id = train_ids, label = y[train_ids], set = "Train")
+pred_val_tbl <- tibble(cell_id = val_ids, label = y[val_ids], set = "Validation")
+pred_test_tbl <- tibble(cell_id = test_ids, label = y[test_ids], set = "Test")
+for (m in names(mod_results)) {
+  pred_train_tbl[[paste0(m, "_OOF")]] <- mod_results[[m]]$oof[train_ids]
+  pred_train_tbl[[paste0(m, "_FIT")]] <- mod_results[[m]]$train_fit
+  pred_val_tbl[[paste0(m, "_PROB")]] <- mod_results[[m]]$val
+  pred_test_tbl[[paste0(m, "_PROB")]] <- mod_results[[m]]$test
+}
+write_csv(pred_train_tbl, file.path(dirs$model, "单模态预测_训练集OOF与拟合值.csv"))
+write_csv(pred_val_tbl, file.path(dirs$model, "单模态预测_验证集.csv"))
+write_csv(pred_test_tbl, file.path(dirs$model, "单模态预测_测试集.csv"))
+
+val_y <- y[val_ids]
+single_val_metrics <- imap_dfr(mod_results, function(res, m) {
+  aucs <- compute_auc(val_y, res$val)
+  tibble(Model = paste0("Single - ", m), modality = m, Set = "Validation",
+         AUROC = aucs$roc_auc, AUPRC = aucs$pr_auc,
+         n_features_raw = res$feature_n_raw, n_features_used = res$feature_n_used)
+}) %>% arrange(desc(AUROC))
+write_csv(single_val_metrics, file.path(dirs$model, "内部验证_单模态AUC汇总.csv"))
+kept <- single_val_metrics %>% filter(AUROC >= 0.70) %>% pull(modality)
+if (!length(kept)) kept <- single_val_metrics$modality[1:min(3, nrow(single_val_metrics))]
+write_csv(tibble(kept_modality = kept), file.path(dirs$model, "进入融合模型的模态.csv"))
+message(">>> Kept modalities: ", paste(kept, collapse = ", "))
+
+X_meta_train <- do.call(cbind, lapply(mod_results[kept], function(z) z$oof[train_ids]))
+X_meta_val <- do.call(cbind, lapply(mod_results[kept], function(z) z$val))
+X_meta_test <- do.call(cbind, lapply(mod_results[kept], function(z) z$test))
+colnames(X_meta_train) <- colnames(X_meta_val) <- colnames(X_meta_test) <- kept
+foldid_meta <- caret::createFolds(y[train_ids], k = 5, list = FALSE)
+meta_fit <- cv.glmnet(as.matrix(X_meta_train), y[train_ids], family = "binomial",
+                      alpha = 0, type.measure = "auc", foldid = foldid_meta,
+                      weights = class_weights(y[train_ids]))
+p_val <- as.numeric(predict(meta_fit, newx = as.matrix(X_meta_val), s = "lambda.min", type = "response"))
+p_test <- as.numeric(predict(meta_fit, newx = as.matrix(X_meta_test), s = "lambda.min", type = "response"))
+write_csv(tibble(cell_id = val_ids, label = val_y, PCM_score = p_val),
+          file.path(dirs$model, "融合模型预测_验证集.csv"))
+write_csv(tibble(cell_id = test_ids, label = y[test_ids], PCM_score = p_test),
+          file.path(dirs$model, "融合模型预测_测试集.csv"))
+
+roc_list_val <- setNames(lapply(kept, function(m) pROC::roc(val_y, mod_results[[m]]$val, quiet = TRUE)),
+                         paste0("Single - ", kept))
+roc_list_val[["PCM (Stack)"]] <- pROC::roc(val_y, p_val, quiet = TRUE)
+auc_val_summary <- bind_rows(
+  single_val_metrics %>% filter(modality %in% kept) %>% dplyr::select(Set, Model, AUROC, AUPRC),
+  { aucs <- compute_auc(val_y, p_val); tibble(Set = "Validation", Model = "PCM (Stack)", AUROC = aucs$roc_auc, AUPRC = aucs$pr_auc) }
+) %>% arrange(desc(AUROC))
+write_csv(auc_val_summary, file.path(dirs$model, "内部验证_AUC汇总.csv"))
+save_roc_plot(roc_list_val, file.path(dirs$model, "内部验证_ROC对比.pdf"), "Validation ROC: single modalities vs MP-Scan")
+df_pr_val <- bind_rows(lapply(kept, function(m) make_pr_df(mod_results[[m]]$val, val_y, paste0("Single - ", m))),
+                       make_pr_df(p_val, val_y, "PCM (Stack)"))
+save_pr_plot(df_pr_val, file.path(dirs$model, "内部验证_PR对比.pdf"), "Validation PR: single modalities vs MP-Scan")
+
+thr <- pick_threshold(val_y, p_val, target_sp = 0.90)
+write_csv(tibble(threshold = thr, threshold_strategy = "Validation set; max sensitivity under specificity >= 0.90"),
+          file.path(dirs$model, "阈值_内部验证确定.csv"))
+message(">>> Locked threshold: ", signif(thr, 5))
+
+y_test <- y[test_ids]
+rows_test <- list()
+stack_auc <- compute_auc(y_test, p_test)
+ci_roc <- pROC::ci.auc(stack_auc$roc)
+ci_pr <- pr_auc_boot_ci(y_test, p_test, B = 1000, seed = 7)
+rows_test[["PCM"]] <- tibble(Set = "Test", Model = "PCM (Stack)",
+                             AUROC = stack_auc$roc_auc,
+                             AUROC_CI_low = as.numeric(ci_roc[1]), AUROC_CI_high = as.numeric(ci_roc[3]),
+                             AUPRC = stack_auc$pr_auc,
+                             AUPRC_CI_low = ci_pr[["lower"]], AUPRC_CI_high = ci_pr[["upper"]])
+for (m in names(mod_results)) {
+  aucs <- compute_auc(y_test, mod_results[[m]]$test)
+  ci_roc_m <- pROC::ci.auc(aucs$roc)
+  ci_pr_m <- pr_auc_boot_ci(y_test, mod_results[[m]]$test, B = 1000, seed = 11)
+  rows_test[[m]] <- tibble(Set = "Test", Model = paste0("Single - ", m),
+                           AUROC = aucs$roc_auc,
+                           AUROC_CI_low = as.numeric(ci_roc_m[1]), AUROC_CI_high = as.numeric(ci_roc_m[3]),
+                           AUPRC = aucs$pr_auc,
+                           AUPRC_CI_low = ci_pr_m[["lower"]], AUPRC_CI_high = ci_pr_m[["upper"]])
+}
+auc_test_summary <- bind_rows(rows_test) %>% arrange(desc(AUROC))
+write_csv(auc_test_summary, file.path(dirs$model, "测试集_AUC与95CI_融合与单模态.csv"))
+cm_test <- metrics_at(y_test, p_test, thr)
+write_csv(cm_test, file.path(dirs$model, "测试集_固定阈值下指标.csv"))
+pred_test_locked <- tibble(cell_id = test_ids, true_label = ifelse(y_test == 1, "pre", "non_pre"),
+                           true_label_num = y_test, PCM_score = p_test, threshold = thr,
+                           pred_label_num = as.integer(p_test >= thr),
+                           pred_label = ifelse(p_test >= thr, "pre", "non_pre"))
+write_csv(pred_test_locked, file.path(dirs$model, "测试集_逐细胞预测结果.csv"))
+
+roc_pcm_test <- pROC::roc(y_test, p_test, quiet = TRUE)
+delong_tbl <- bind_rows(lapply(kept, function(m) {
+  roc_m <- pROC::roc(y_test, mod_results[[m]]$test, quiet = TRUE)
+  tst <- pROC::roc.test(roc_pcm_test, roc_m, method = "delong")
+  tibble(Comparison = paste0("PCM (Stack) vs Single - ", m),
+         Delta_AUROC = as.numeric(pROC::auc(roc_pcm_test) - pROC::auc(roc_m)),
+         p_value = as.numeric(tst$p.value))
+}))
+write_csv(delong_tbl, file.path(dirs$model, "测试集_AUROC对比检验_DeLong.csv"))
+roc_list_test <- setNames(lapply(kept, function(m) pROC::roc(y_test, mod_results[[m]]$test, quiet = TRUE)),
+                          paste0("Single - ", kept))
+roc_list_test[["PCM (Stack)"]] <- roc_pcm_test
+save_roc_plot(roc_list_test, file.path(dirs$model, "测试集_ROC对比.pdf"), "Test ROC: single modalities vs MP-Scan")
+df_pr_test <- bind_rows(lapply(kept, function(m) make_pr_df(mod_results[[m]]$test, y_test, paste0("Single - ", m))),
+                        make_pr_df(p_test, y_test, "PCM (Stack)"))
+save_pr_plot(df_pr_test, file.path(dirs$model, "测试集_PR对比.pdf"), "Test PR: single modalities vs MP-Scan")
+
+cm_plot_df <- pred_test_locked %>% dplyr::count(pred_label, true_label) %>%
+  complete(pred_label = c("pre", "non_pre"), true_label = c("pre", "non_pre"), fill = list(n = 0))
+p_cm <- ggplot(cm_plot_df, aes(x = true_label, y = pred_label, fill = n)) +
+  geom_tile() + geom_text(aes(label = n), size = 5) +
+  scale_x_discrete(limits = c("pre", "non_pre")) + scale_y_discrete(limits = c("pre", "non_pre")) +
+  labs(title = "Test confusion matrix", x = "True", y = "Predicted") + theme_pub()
+ggsave(file.path(dirs$model, "测试集_混淆矩阵.pdf"), p_cm, width = 5, height = 4)
+p_score <- ggplot(pred_test_locked, aes(x = PCM_score, fill = true_label)) +
+  geom_histogram(position = "identity", alpha = 0.55, bins = 25) +
+  geom_vline(xintercept = thr, colour = "red", linetype = 2) +
+  labs(title = "Test MP-Scan score", x = "MP-Scan score", y = "Cell count") + theme_pub()
+ggsave(file.path(dirs$model, "测试集_PCM分数分布.pdf"), p_score, width = 6, height = 4)
+
+coef_df <- data.frame(Feature = rownames(coef(meta_fit, s = "lambda.min")),
+                      Weight = as.numeric(coef(meta_fit, s = "lambda.min")[, 1]))
+write_csv(coef_df, file.path(dirs$model, "融合模型_模态权重.csv"))
+save(mod_results, file = file.path(dirs$model, "PCM_single_models_OOF.RData"))
+save(meta_fit, file = file.path(dirs$model, "PCM_final_meta_model.RData"))
+save(splits, thr, kept, file = file.path(dirs$model, "PCM_model_metadata.RData"))
+
+predict_modalities <- function(raw_files, label_file = NULL, label_mapper = NULL, output_dir) {
+  X_list <- lapply(raw_files[kept], read_raw_matrix)
+  common <- Reduce(intersect, lapply(X_list, rownames))
+  X_list <- lapply(X_list, function(X) X[common, , drop = FALSE])
+  single <- list()
+  coverage <- list()
+  for (m in kept) {
+    pp <- mod_results[[m]]$preprocessor
+    common_feat <- intersect(colnames(X_list[[m]]), pp$features)
+    coverage[[m]] <- tibble(modality = m, usable_training_features = length(common_feat),
+                             model_features = length(pp$features),
+                             coverage = length(common_feat) / length(pp$features))
+    Xstd <- transform_with_preprocessor(X_list[[m]], pp)
+    single[[m]] <- as.numeric(predict(mod_results[[m]]$fit, newx = Xstd, s = "lambda.min", type = "response"))
+    names(single[[m]]) <- rownames(Xstd)
+  }
+  X_meta <- do.call(cbind, lapply(kept, function(m) single[[m]][common]))
+  colnames(X_meta) <- kept
+  pcm <- as.numeric(predict(meta_fit, newx = as.matrix(X_meta), s = "lambda.min", type = "response"))
+  score_df <- tibble(cell_id = common, PCM_score = pcm)
+  for (m in kept) score_df[[paste0(m, "_score")]] <- single[[m]][common]
+  if (!is.null(label_file)) {
+    lab <- readr::read_csv(label_file, show_col_types = FALSE)
+    idc <- detect_id_col(lab)
+    lbl_col <- setdiff(names(lab), idc)[1]
+    names(lab)[names(lab) == idc] <- "cell_id"
+    lab <- lab %>% mutate(cell_id = as.character(cell_id), label_raw = as.character(.data[[lbl_col]]))
+    score_df <- left_join(score_df, lab[, c("cell_id", "label_raw")], by = "cell_id")
+    if (!is.null(label_mapper)) score_df$label_num <- label_mapper(score_df$label_raw)
+  }
+  write_csv(bind_rows(coverage), file.path(output_dir, "特征覆盖情况.csv"))
+  score_df
+}
+
+# 2. Expanded evaluation
+message(">>> Step 2: expanded evaluation")
+map_expanded_label <- function(x) {
+  z <- trimws(tolower(as.character(x)))
+  ifelse(z == "pre", 1L,
+         ifelse(z %in% c("non-pre", "non_pre", "nonpre", "normal"), 0L, NA_integer_))
+}
+expanded_df <- predict_modalities(external_files, all_group_file, map_expanded_label, dirs$expanded)
+write_csv(expanded_df, file.path(dirs$expanded, "扩展评估_逐细胞打分明细.csv"))
+eval_exp <- expanded_df %>% filter(!is.na(label_num))
+auc_exp <- compute_auc(eval_exp$label_num, eval_exp$PCM_score)
+ci_exp <- pROC::ci.auc(auc_exp$roc)
+ci_pr_exp <- pr_auc_boot_ci(eval_exp$label_num, eval_exp$PCM_score, B = 1000, seed = 17)
+exp_auc_tbl <- tibble(Set = "Expanded evaluation", Scope = "pre vs (non-pre + normal)",
+                      Model = "PCM (Stack)", AUROC = auc_exp$roc_auc,
+                      AUROC_CI_low = as.numeric(ci_exp[1]), AUROC_CI_high = as.numeric(ci_exp[3]),
+                      AUPRC = auc_exp$pr_auc, AUPRC_CI_low = ci_pr_exp[["lower"]], AUPRC_CI_high = ci_pr_exp[["upper"]])
+write_csv(exp_auc_tbl, file.path(dirs$expanded, "扩展评估_pre_vs_nonpre_plus_normal_AUC与95CI.csv"))
+write_csv(metrics_at(eval_exp$label_num, eval_exp$PCM_score, thr) %>% mutate(Model = "PCM (Stack)", .before = 1),
+          file.path(dirs$expanded, "扩展评估_pre_vs_nonpre_plus_normal_固定阈值指标.csv"))
+write_csv(eval_exp %>% group_by(label_raw) %>% summarise(n = n(), mean = mean(PCM_score), median = median(PCM_score), .groups = "drop"),
+          file.path(dirs$expanded, "扩展评估_各组分数概览.csv"))
+save_roc_plot(list("PCM (Stack)" = auc_exp$roc), file.path(dirs$expanded, "扩展评估_ROC对比.pdf"), "Expanded evaluation ROC")
+save_pr_plot(make_pr_df(eval_exp$PCM_score, eval_exp$label_num, "PCM (Stack)"),
+             file.path(dirs$expanded, "扩展评估_PR对比.pdf"), "Expanded evaluation PR")
+pred_exp <- eval_exp %>% mutate(pred_label_num = as.integer(PCM_score >= thr),
+                                pred_label = ifelse(pred_label_num == 1, "pre", "non_pre_or_normal"),
+                                true_label = ifelse(label_num == 1, "pre", "non_pre_or_normal"))
+cm_exp <- pred_exp %>% dplyr::count(pred_label, true_label) %>%
+  complete(pred_label = c("pre", "non_pre_or_normal"), true_label = c("pre", "non_pre_or_normal"), fill = list(n = 0))
+p_exp_cm <- ggplot(cm_exp, aes(x = true_label, y = pred_label, fill = n)) +
+  geom_tile() + geom_text(aes(label = n), size = 5) + labs(title = "Expanded evaluation confusion matrix", x = "True", y = "Predicted") + theme_pub()
+ggsave(file.path(dirs$expanded, "扩展评估_混淆矩阵.pdf"), p_exp_cm, width = 5.5, height = 4.2)
+p_exp_dist <- ggplot(eval_exp, aes(x = PCM_score, fill = label_raw)) +
+  geom_density(alpha = 0.35) + geom_vline(xintercept = thr, colour = "red", linetype = 2) +
+  labs(title = "Expanded evaluation MP-Scan score", x = "MP-Scan score", y = "Density") + theme_pub()
+ggsave(file.path(dirs$expanded, "扩展评估_PCM分数分布.pdf"), p_exp_dist, width = 6, height = 4)
+p_exp_vln <- ggplot(eval_exp, aes(x = label_raw, y = PCM_score, fill = label_raw)) +
+  geom_violin(trim = FALSE, alpha = 0.55) + geom_boxplot(width = 0.12, outlier.shape = NA) +
+  geom_jitter(width = 0.12, size = 0.7, alpha = 0.65) +
+  geom_hline(yintercept = thr, colour = "red", linetype = 2) +
+  labs(title = "Expanded evaluation MP-Scan score by group", x = NULL, y = "MP-Scan score") + theme_pub()
+ggsave(file.path(dirs$expanded, "扩展评估_PCM分数小提琴图.pdf"), p_exp_vln, width = 6, height = 4)
+
+# 3. Benign vs malignant exploratory evaluation
+message(">>> Step 3: benign vs malignant evaluation")
+map_benign_label <- function(x) {
+  z <- trimws(tolower(as.character(x)))
+  ifelse(z %in% c("cancer", "tumor", "tumour", "pc", "prad", "prostate", "malignant"), 1L,
+         ifelse(z %in% c("benign", "normal", "healthy", "control"), 0L, NA_integer_))
+}
+benign_df <- predict_modalities(benign_files, benign_group_file, map_benign_label, dirs$benign)
+write_csv(benign_df, file.path(dirs$benign, "良恶性分类_逐样本打分明细.csv"))
+benign_eval <- benign_df %>% filter(!is.na(label_num))
+auc_ben <- compute_auc(benign_eval$label_num, benign_eval$PCM_score)
+ci_ben <- pROC::ci.auc(auc_ben$roc)
+ci_pr_ben <- pr_auc_boot_ci(benign_eval$label_num, benign_eval$PCM_score, B = 1000, seed = 19)
+ben_metrics <- metrics_at(benign_eval$label_num, benign_eval$PCM_score, thr)
+ben_tbl <- tibble(Set = "Benign vs malignant", Model = "PCM (Stack)", Threshold = thr,
+                  AUROC = auc_ben$roc_auc, AUROC_CI_low = as.numeric(ci_ben[1]), AUROC_CI_high = as.numeric(ci_ben[3]),
+                  AUPRC = auc_ben$pr_auc, AUPRC_CI_low = ci_pr_ben[["lower"]], AUPRC_CI_high = ci_pr_ben[["upper"]]) %>%
+  bind_cols(ben_metrics %>% dplyr::select(-Threshold))
+write_csv(ben_tbl, file.path(dirs$benign, "良恶性分类_锁定阈值评估汇总.csv"))
+ben_pred <- benign_eval %>% mutate(pred_label_num = as.integer(PCM_score >= thr),
+                                   pred_label = ifelse(pred_label_num == 1, "malignant", "benign"),
+                                   true_label = ifelse(label_num == 1, "malignant", "benign"))
+write_csv(ben_pred, file.path(dirs$benign, "良恶性分类_逐样本预测_锁定阈值.csv"))
+save_roc_plot(list("PCM (Stack)" = auc_ben$roc), file.path(dirs$benign, "图_ROC.pdf"), "Benign vs malignant ROC")
+save_pr_plot(make_pr_df(benign_eval$PCM_score, benign_eval$label_num, "PCM (Stack)"),
+             file.path(dirs$benign, "图_PR.pdf"), "Benign vs malignant PR")
+p_ben_box <- ggplot(benign_eval, aes(x = label_raw, y = PCM_score, fill = label_raw)) +
+  geom_boxplot(width = 0.35, outlier.shape = NA, alpha = 0.6) + geom_jitter(width = 0.12, size = 1.5) +
+  geom_hline(yintercept = thr, colour = "red", linetype = 2) +
+  labs(title = "Benign vs malignant MP-Scan score", x = NULL, y = "MP-Scan score") + theme_pub()
+ggsave(file.path(dirs$benign, "图_PCM分数_箱线散点.pdf"), p_ben_box, width = 5.2, height = 4)
+cm_ben <- ben_pred %>% dplyr::count(pred_label, true_label) %>%
+  complete(pred_label = c("malignant", "benign"), true_label = c("malignant", "benign"), fill = list(n = 0))
+p_ben_cm <- ggplot(cm_ben, aes(x = true_label, y = pred_label, fill = n)) +
+  geom_tile() + geom_text(aes(label = n), size = 5) + labs(title = "Benign vs malignant confusion matrix", x = "True", y = "Predicted") + theme_pub()
+ggsave(file.path(dirs$benign, "图_混淆矩阵.pdf"), p_ben_cm, width = 5, height = 4)
+
+# 4. TCGA methylation survival
+message(">>> Step 4: TCGA methylation survival")
+extract_nonzero <- function(fit) {
+  cf <- as.matrix(coef(fit, s = "lambda.min"))[-1, , drop = FALSE]
+  nz <- cf[abs(cf[, 1]) > 0, , drop = FALSE]
+  tibble(feature_id = rownames(nz), coef = as.numeric(nz[, 1]))
+}
+feat_tab <- bind_rows(lapply(intersect(c("VMR", "Promoter", "DMR"), names(mod_results)), function(m) {
+  extract_nonzero(mod_results[[m]]$fit) %>% mutate(modality = m, .before = 1)
+}))
+parse_coord <- function(id) {
+  m <- stringr::str_match(id, "^(chr)?([0-9XYM]+)[:_](\\d+)-(\\d+)$")
+  if (is.na(m[1, 1])) return(c(NA_character_, NA_integer_, NA_integer_))
+  c(paste0("chr", m[1, 3]), as.integer(m[1, 4]), as.integer(m[1, 5]))
+}
+coords <- t(vapply(feat_tab$feature_id, parse_coord, FUN.VALUE = c("chr" = "", "start" = 0L, "end" = 0L)))
+feat_tab$chr <- coords[, 1]
+feat_tab$start <- as.integer(coords[, 2])
+feat_tab$end <- as.integer(coords[, 3])
+feat_tab <- feat_tab %>% mutate(direction_meth = ifelse(coef > 0, "hyper", "hypo"))
+write_csv(feat_tab, file.path(dirs$tcga, "特征主表_甲基化三模态_nonzero.csv"))
+tab2 <- feat_tab %>% filter(!is.na(chr), !is.na(start), !is.na(end), is.finite(start), is.finite(end))
+if (!nrow(tab2)) stop("No coordinate-like model features for TCGA mapping.")
+gr <- GRanges(seqnames = tab2$chr, ranges = IRanges(tab2$start, tab2$end))
+names(gr) <- tab2$feature_id
+peakAnno <- annotatePeak(gr, TxDb = TxDb.Hsapiens.UCSC.hg19.knownGene, annoDb = "org.Hs.eg.db")
+anno_df <- as.data.frame(peakAnno)
+anno_min <- anno_df[, intersect(c("SYMBOL", "annotation"), names(anno_df)), drop = FALSE]
+if (!"SYMBOL" %in% names(anno_min)) anno_min$SYMBOL <- NA_character_
+if (!"annotation" %in% names(anno_min)) anno_min$annotation <- NA_character_
+tab_annot <- bind_cols(tab2, anno_min[, c("SYMBOL", "annotation")]) %>% dplyr::rename(gene_symbol = SYMBOL)
+write_csv(tab_annot, file.path(dirs$tcga, "特征主表_含基因注释.csv"))
+
+tcga_beta_path <- file.path(root_dir, "第三版模型结果/TCGA-生存/PRAD.methylation450.knn.txt")
+tcga_probe_annot <- file.path(root_dir, "第三版模型结果/TCGA-生存/TCGA_450k_probe_annot_hg19.csv.gz")
+tcga_clinical_path <- file.path(root_dir, "第三版模型结果/TCGA-生存/TCGA-PRAD.survival.tsv")
+message(">>> Reading TCGA beta matrix; this can take a while.")
+beta_dt <- data.table::fread(tcga_beta_path, data.table = FALSE)
+if (!"probe" %in% names(beta_dt)) names(beta_dt)[1] <- "probe"
+rownames(beta_dt) <- beta_dt$probe; beta_dt$probe <- NULL
+beta_mat <- as.matrix(beta_dt)
+colnames(beta_mat) <- toupper(substr(gsub("\\.", "-", colnames(beta_mat)), 1, 16))
+probe_annot <- readr::read_csv(tcga_probe_annot, show_col_types = FALSE)
+stopifnot(all(c("cg", "chr", "pos") %in% names(probe_annot)))
+regions <- tab_annot %>% distinct(modality, feature_id, chr, start, end)
+gr_region <- GRanges(seqnames = regions$chr, ranges = IRanges(regions$start, regions$end))
+mcols(gr_region)$feature_id <- regions$feature_id
+mcols(gr_region)$modality <- regions$modality
+gr_cg <- GRanges(seqnames = probe_annot$chr, ranges = IRanges(probe_annot$pos, probe_annot$pos))
+names(gr_cg) <- probe_annot$cg
+
+mapped <- list()
+left_ids <- mcols(gr_region)$feature_id
+for (w in c(0, 500, 1000, 2000, 5000)) {
+  if (!length(left_ids)) break
+  gr_all <- gr_region[mcols(gr_region)$feature_id %in% left_ids]
+  gr_try <- if (w == 0) gr_all else resize(gr_all, width = width(gr_all) + 2 * w, fix = "center")
+  hits <- findOverlaps(gr_cg, gr_try)
+  if (length(hits)) {
+    rid <- mcols(gr_try)$feature_id[subjectHits(hits)]
+    cgids <- names(gr_cg)[queryHits(hits)]
+    tmp <- split(cgids, rid)
+    for (fid in names(tmp)) mapped[[fid]] <- unique(c(mapped[[fid]], tmp[[fid]]))
+    left_ids <- setdiff(left_ids, names(tmp))
+  }
+  message(">>> TCGA mapping +/-", w, "bp: ", length(mapped), "/", length(mcols(gr_region)$feature_id))
+}
+left_ids <- setdiff(mcols(gr_region)$feature_id, names(mapped))
+if (length(left_ids)) {
+  gr_left <- gr_region[mcols(gr_region)$feature_id %in% left_ids]
+  nn <- nearest(gr_left, gr_cg, select = "all")
+  df_nn <- data.frame(fid = mcols(gr_left)$feature_id[queryHits(nn)],
+                      cg = names(gr_cg)[subjectHits(nn)],
+                      dist = as.numeric(distance(gr_left[queryHits(nn)], gr_cg[subjectHits(nn)])))
+  df_nn <- df_nn[df_nn$dist <= 5000, , drop = FALSE]
+  if (nrow(df_nn)) {
+    df_nn <- df_nn[order(df_nn$fid, df_nn$dist), ]
+    pick <- ave(df_nn$cg, df_nn$fid, FUN = seq_along) <= 3
+    add <- split(df_nn$cg[pick], df_nn$fid[pick])
+    for (fid in names(add)) mapped[[fid]] <- unique(c(mapped[[fid]], add[[fid]]))
+  }
+}
+write_csv(tibble(feature_id = sort(intersect(regions$feature_id, names(mapped)))),
+          file.path(dirs$tcga, "可映射区域列表.csv"))
+write_csv(tibble(feature_id = sort(setdiff(regions$feature_id, names(mapped)))),
+          file.path(dirs$tcga, "不可映射区域列表.csv"))
+
+agg_region_beta <- function(probes) {
+  pr <- intersect(rownames(beta_mat), probes)
+  if (!length(pr)) return(rep(NA_real_, ncol(beta_mat)))
+  if (length(pr) == 1) return(as.numeric(beta_mat[pr, , drop = FALSE]))
+  as.numeric(colMeans(beta_mat[pr, , drop = FALSE], na.rm = TRUE))
+}
+get_tcga_mat <- function(mod) {
+  feats <- regions$feature_id[regions$modality == mod]
+  idx_map <- mapped[feats]
+  idx_map <- idx_map[!vapply(idx_map, is.null, logical(1))]
+  if (!length(idx_map)) return(NULL)
+  M <- vapply(idx_map, agg_region_beta, FUN.VALUE = numeric(ncol(beta_mat)))
+  M <- t(M)
+  rownames(M) <- names(idx_map)
+  colnames(M) <- colnames(beta_mat)
+  M
+}
+X_list_tcga <- list(VMR = get_tcga_mat("VMR"), Promoter = get_tcga_mat("Promoter"), DMR = get_tcga_mat("DMR"))
+X_list_tcga <- X_list_tcga[!vapply(X_list_tcga, is.null, logical(1))]
+common_sid <- Reduce(intersect, lapply(X_list_tcga, colnames))
+X_list_tcga <- lapply(X_list_tcga, function(M) M[, common_sid, drop = FALSE])
+tcga_single <- list()
+for (m in intersect(kept, names(X_list_tcga))) {
+  Xraw <- t(X_list_tcga[[m]])
+  pp <- mod_results[[m]]$preprocessor
+  Xstd <- transform_with_preprocessor(Xraw, pp)
+  tcga_single[[m]] <- as.numeric(predict(mod_results[[m]]$fit, newx = Xstd, s = "lambda.min", type = "response"))
+  names(tcga_single[[m]]) <- rownames(Xstd)
+}
+tcga_meta_df <- tibble(sample_id = common_sid)
+for (m in names(tcga_single)) tcga_meta_df[[m]] <- tcga_single[[m]][common_sid]
+X_meta_tcga <- as.matrix(tcga_meta_df[, kept, drop = FALSE])
+tcga_meta_df$PCM <- as.numeric(predict(meta_fit, newx = X_meta_tcga, s = "lambda.min", type = "response"))
+write_csv(tcga_meta_df, file.path(dirs$tcga, "TCGA_融合层输入与PCM预览.csv"))
+write_csv(tcga_meta_df[, c("sample_id", names(tcga_single))], file.path(dirs$tcga, "TCGA_单模态得分_按样本.csv"))
+
+clin <- data.table::fread(tcga_clinical_path, data.table = FALSE)
+clin <- clin[, c("sample", "OS.time", "OS", "_PATIENT")]
+names(clin) <- c("sample_id", "time_months", "event", "patient_id")
+clin$sample_id <- toupper(substr(gsub("\\.", "-", clin$sample_id), 1, 16))
+clin$time_months <- as.numeric(clin$time_months)
+if (max(clin$time_months, na.rm = TRUE) > 200) clin$time_months <- clin$time_months / 30.44
+clin$event <- as.integer(clin$event)
+dat_tcga <- left_join(tcga_meta_df, clin, by = "sample_id") %>%
+  filter(is.finite(time_months), time_months > 0, event %in% 0:1, is.finite(PCM))
+dmr_prom <- scale(dat_tcga[, c("DMR", "Promoter")])
+dat_tcga$DMR_Promoter_score <- rowMeans(dmr_prom)
+write_csv(dat_tcga, file.path(dirs$tcga, "TCGA_PCM_合并临床_用于生存分析的数据.csv"))
+
+safe_iAUC <- function(marker, Tm, Ev, start_month = 12, end_month = 60, iid = FALSE) {
+  ok <- is.finite(marker) & is.finite(Tm) & Tm > 0 & Ev %in% 0:1
+  tt <- seq(start_month, min(end_month, floor(max(Tm[ok], na.rm = TRUE) - 1)), by = 1)
+  tr <- timeROC(T = Tm[ok], delta = Ev[ok], marker = marker[ok], cause = 1, times = tt, iid = iid)
+  list(iAUC = mean(tr$AUC, na.rm = TRUE), tr = tr, times = tt)
+}
+cox_row <- function(marker_name, marker, Tm, Ev) {
+  fit <- coxph(Surv(Tm, Ev) ~ marker)
+  s <- summary(fit)
+  tibble(score = marker_name, HR = unname(s$conf.int[1, "exp(coef)"]),
+         CI_low = unname(s$conf.int[1, "lower .95"]),
+         CI_high = unname(s$conf.int[1, "upper .95"]),
+         pvalue = unname(s$coefficients[1, "Pr(>|z|)"]))
+}
+candidate_scores <- c("PCM", intersect(c("VMR", "Promoter", "DMR"), names(dat_tcga)), "DMR_Promoter_score")
+surv_metrics <- bind_rows(lapply(candidate_scores, function(s) {
+  ia6 <- safe_iAUC(dat_tcga[[s]], dat_tcga$time_months, dat_tcga$event, 6, 60)$iAUC
+  ia12 <- safe_iAUC(dat_tcga[[s]], dat_tcga$time_months, dat_tcga$event, 0, 60)$iAUC
+  cx <- cox_row(s, dat_tcga[[s]], dat_tcga$time_months, dat_tcga$event)
+  mutate(cx, iAUC_6_60 = ia6, iAUC_0_60 = ia12)
+})) %>% arrange(desc(iAUC_0_60))
+write_csv(surv_metrics, file.path(dirs$tcga, "TCGA_候选预后分数汇总.csv"))
+teacher_score <- "DMR_Promoter_score"
+
+ia_teacher <- safe_iAUC(dat_tcga[[teacher_score]], dat_tcga$time_months, dat_tcga$event, 0, 60, iid = TRUE)
+res_teacher <- tibble(time = ia_teacher$times, AUC = ia_teacher$tr$AUC,
+                      se = if (!is.null(ia_teacher$tr$inference$vect_sd_1)) ia_teacher$tr$inference$vect_sd_1 else NA_real_) %>%
+  mutate(lower = pmax(0, AUC - 1.96 * se), upper = pmin(1, AUC + 1.96 * se),
+         AUC_smooth = zoo::rollapply(AUC, width = 3, fill = "extend", align = "center", FUN = mean, na.rm = TRUE))
+write_csv(res_teacher, file.path(dirs$tcga, "TCGA_DMR_Promoter_timeROC_0_60月_含SE.csv"))
+p_troc <- ggplot(res_teacher, aes(time, AUC)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15) + geom_line(linewidth = 1) +
+  geom_line(aes(y = AUC_smooth), linetype = "dashed", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dotted") +
+  labs(title = sprintf("DMR+Promoter TCGA timeROC (0-60 months, iAUC=%.3f)", ia_teacher$iAUC),
+       x = "Time (month)", y = "AUC") + theme_pub()
+ggsave(file.path(dirs$tcga, "TCGA_DMR_Promoter_timeROC_0_60月_平滑含CI.pdf"), p_troc, width = 6.6, height = 4.6)
+
+t_star <- 120
+df_surv <- dat_tcga %>% mutate(time_win = pmin(time_months, t_star),
+                               event_win = ifelse(time_months <= t_star & event == 1, 1, 0),
+                               marker = .data[[teacher_score]])
+cut <- survminer::surv_cutpoint(df_surv, time = "time_win", event = "event_win", variables = "marker", minprop = 0.2)
+thr_surv <- cut$cutpoint$cutpoint[1]
+df_surv$grp <- ifelse(df_surv$marker >= thr_surv, "High", "Low")
+fit_km <- survfit(Surv(time_win, event_win) ~ grp, data = df_surv)
+km_plot <- ggsurvplot(fit_km, data = df_surv, pval = TRUE, conf.int = TRUE, risk.table = TRUE,
+                      risk.table.height = 0.22, xlim = c(0, t_star), break.time.by = 12,
+                      palette = c("#D55E00", "#0072B2"),
+                      title = sprintf("DMR+Promoter TCGA KM (cutpoint=%.3f)", thr_surv),
+                      xlab = "Time (month)", ylab = "Overall survival")
+ggsave(file.path(dirs$tcga, "TCGA_DMR_Promoter_KM_0_120月.pdf"), km_plot$plot, width = 6.6, height = 4.8)
+ggsave(file.path(dirs$tcga, "TCGA_DMR_Promoter_KM_0_120月_风险表.pdf"), km_plot$table, width = 6.6, height = 2.6)
+write_csv(tibble(threshold = thr_surv), file.path(dirs$tcga, "阈值_DMR_Promoter_surv_cutpoint.csv"))
+write_csv(df_surv, file.path(dirs$tcga, "TCGA_DMR_Promoter_生存分组明细.csv"))
+
+# 5. RNA distillation using selected TCGA prognostic teacher score
+message(">>> Step 5: RNA distillation")
+rna_path <- file.path(root_dir, "第三版模型结果/TCGA-生存/PRAD_gene_count.txt")
+rna_counts <- read.table(rna_path, check.names = FALSE)
+colnames(rna_counts) <- toupper(substr(gsub("\\.", "-", colnames(rna_counts)), 1, 16))
+rna_logcpm <- edgeR::cpm(rna_counts, log = TRUE, prior.count = 1)
+gene_var <- matrixStats::rowVars(rna_logcpm)
+keep_genes <- names(sort(gene_var, decreasing = TRUE))[seq_len(min(5000, length(gene_var)))]
+rna_logcpm <- rna_logcpm[keep_genes, , drop = FALSE]
+common_rna <- intersect(colnames(rna_logcpm), dat_tcga$sample_id)
+X_train <- t(rna_logcpm[, common_rna, drop = FALSE])
+y_teacher <- dat_tcga[[teacher_score]][match(common_rna, dat_tcga$sample_id)]
+surv_T <- dat_tcga$time_months[match(common_rna, dat_tcga$sample_id)]
+surv_E <- dat_tcga$event[match(common_rna, dat_tcga$sample_id)]
+X_mu <- colMeans(X_train); X_sd <- apply(X_train, 2, sd); X_sd[!is.finite(X_sd) | X_sd == 0] <- 1
+Xz <- scale(X_train, center = X_mu, scale = X_sd)
+set.seed(1)
+cv_stu <- cv.glmnet(Xz, y_teacher, family = "gaussian", alpha = 0.5, nfolds = 5, standardize = FALSE)
+stu_train <- drop(predict(cv_stu$glmnet.fit, newx = Xz, s = cv_stu$lambda.min, type = "link"))
+pearson <- cor.test(y_teacher, stu_train, method = "pearson")
+spearman <- suppressWarnings(cor.test(y_teacher, stu_train, method = "spearman", exact = FALSE))
+ia_stu <- safe_iAUC(stu_train, surv_T, surv_E, 0, 60, iid = TRUE)
+ia_stu_6 <- safe_iAUC(stu_train, surv_T, surv_E, 6, 60, iid = FALSE)$iAUC
+res_stu <- tibble(time = ia_stu$times, AUC = ia_stu$tr$AUC,
+                  se = if (!is.null(ia_stu$tr$inference$vect_sd_1)) ia_stu$tr$inference$vect_sd_1 else NA_real_) %>%
+  mutate(lower = pmax(0, AUC - 1.96 * se), upper = pmin(1, AUC + 1.96 * se),
+         AUC_smooth = zoo::rollapply(AUC, width = 3, fill = "extend", align = "center", FUN = mean, na.rm = TRUE))
+write_csv(res_stu, file.path(dirs$rna, "RNA蒸馏_学生_timeROC_0_60月_含SE.csv"))
+summary_rna <- tibble(
+  item = c("teacher_score", "n_matched_samples", "pearson_R", "pearson_P", "spearman_rho", "spearman_P",
+           "student_iAUC_6_60", "student_iAUC_0_60", "lambda_min"),
+  value = c(teacher_score, length(common_rna), unname(pearson$estimate), pearson$p.value,
+            unname(spearman$estimate), spearman$p.value, ia_stu_6, ia_stu$iAUC, cv_stu$lambda.min)
+)
+write_csv(summary_rna, file.path(dirs$rna, "RNA蒸馏_老师vs学生_summary.csv"))
+paired_rna <- tibble(sample_id = common_rna, teacher_score = y_teacher, student_RNA = stu_train,
+                     time_months = surv_T, event = surv_E)
+write_csv(paired_rna, file.path(dirs$rna, "RNA蒸馏_老师vs学生_配对分数.csv"))
+saveRDS(list(genes = colnames(X_train), center = X_mu, scale = X_sd, cv = cv_stu,
+             lambda = cv_stu$lambda.min, teacher_score = teacher_score),
+        file.path(dirs$rna, "RNA_学生模型_glmnet.rds"))
+p_scatter <- ggplot(paired_rna, aes(teacher_score, student_RNA)) +
+  geom_point(size = 1.5, alpha = 0.75) + geom_smooth(method = "lm", se = FALSE, colour = "#D55E00") +
+  labs(title = sprintf("Teacher vs RNA student (R=%.2f, P=%.1e)", unname(pearson$estimate), pearson$p.value),
+       x = "Teacher methylation score", y = "RNA student score") + theme_pub()
+ggsave(file.path(dirs$rna, "RNA蒸馏_老师vs学生_相关散点.pdf"), p_scatter, width = 4.8, height = 4.4)
+p_stu_troc <- ggplot(res_stu, aes(time, AUC)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15) + geom_line(linewidth = 1) +
+  geom_line(aes(y = AUC_smooth), linetype = "dashed", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dotted") +
+  labs(title = sprintf("RNA student timeROC (0-60 months, iAUC=%.3f)", ia_stu$iAUC),
+       x = "Time (month)", y = "AUC") + theme_pub()
+ggsave(file.path(dirs$rna, "RNA蒸馏_学生_timeROC_0_60月_平滑含CI.pdf"), p_stu_troc, width = 6.6, height = 4.6)
+
+df_stu <- paired_rna %>% mutate(time_win = pmin(time_months, t_star),
+                                event_win = ifelse(time_months <= t_star & event == 1, 1, 0),
+                                stu = student_RNA)
+cut_stu <- survminer::surv_cutpoint(df_stu, time = "time_win", event = "event_win", variables = "stu", minprop = 0.2)
+thr_stu <- cut_stu$cutpoint$cutpoint[1]
+df_stu$grp <- ifelse(df_stu$stu >= thr_stu, "High", "Low")
+fit_stu <- survfit(Surv(time_win, event_win) ~ grp, data = df_stu)
+km_stu <- ggsurvplot(fit_stu, data = df_stu, pval = TRUE, conf.int = TRUE, risk.table = TRUE,
+                     risk.table.height = 0.22, xlim = c(0, t_star), break.time.by = 12,
+                     palette = c("#D55E00", "#0072B2"),
+                     title = sprintf("RNA student KM (cutpoint=%.3f)", thr_stu),
+                     xlab = "Time (month)", ylab = "Overall survival")
+ggsave(file.path(dirs$rna, "RNA蒸馏_学生_KM_0_120月.pdf"), km_stu$plot, width = 6.6, height = 4.8)
+ggsave(file.path(dirs$rna, "RNA蒸馏_学生_KM_0_120月_风险表.pdf"), km_stu$table, width = 6.6, height = 2.6)
+write_csv(df_stu, file.path(dirs$rna, "RNA蒸馏_学生_KM分组明细.csv"))
+
+run_summary <- bind_rows(
+  tibble(section = "split", metric = paste(split_summary$set, collapse = ";"), value = paste(split_summary$total, collapse = ";")),
+  tibble(section = "model", metric = "kept_modalities", value = paste(kept, collapse = ", ")),
+  tibble(section = "model", metric = "locked_threshold", value = as.character(thr)),
+  tibble(section = "test", metric = "PCM_AUROC", value = as.character(stack_auc$roc_auc)),
+  tibble(section = "test", metric = "PCM_AUPRC", value = as.character(stack_auc$pr_auc)),
+  tibble(section = "expanded", metric = "AUROC", value = as.character(auc_exp$roc_auc)),
+  tibble(section = "benign_malignant", metric = "AUROC", value = as.character(auc_ben$roc_auc)),
+  tibble(section = "tcga", metric = "teacher_score", value = teacher_score),
+  tibble(section = "tcga", metric = "teacher_iAUC_0_60", value = as.character(ia_teacher$iAUC)),
+  tibble(section = "rna", metric = "pearson_R", value = as.character(unname(pearson$estimate))),
+  tibble(section = "rna", metric = "student_iAUC_0_60", value = as.character(ia_stu$iAUC))
+)
+write_csv(run_summary, file.path(out_dir, "第五版运行摘要.csv"))
+message(">>> MP-Scan v5 pipeline finished: ", Sys.time())
